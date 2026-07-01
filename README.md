@@ -3,7 +3,7 @@ Hypoxify helps researchers segment, annotate, and prepare imaging data for AI tr
 with specialized support for microwave and thermoacoustic modalities.
 
 Modules:
-    - io: Load data from various formats (CSV, S2P, MAT, DICOM, H5)
+- io: Load data from various formats (CSV, S2P, MAT, DICOM, H5)
     - preprocess: Background subtraction, denoising, time-gain compensation
     - reconstruct: Delay-and-sum beamforming, thermoacoustic reconstruction
     - segment: SAM wrapper, physics-guided prompting
