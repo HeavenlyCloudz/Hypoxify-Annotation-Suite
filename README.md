@@ -1,2 +1,12 @@
 # Hypoxify-Annotation-Suite
-A physics-informed segmentation platform that embeds microwave and thermoacoustic signal properties directly into SAM's neural pathways. This enables accurate annotation on blurry, artifact-ridden MITT data where standard models fail.
+Hypoxify helps researchers segment, annotate, and prepare imaging data for AI training,
+with specialized support for microwave and thermoacoustic modalities.
+
+Modules:
+    - io: Load data from various formats (CSV, S2P, MAT, DICOM, H5)
+    - preprocess: Background subtraction, denoising, time-gain compensation
+    - reconstruct: Delay-and-sum beamforming, thermoacoustic reconstruction
+    - segment: SAM wrapper, physics-guided prompting
+    - features: Time-domain and frequency-domain feature extraction
+    - export: COCO, YOLO, MONAI, PNG formats
+    - utils: Constants, validators
