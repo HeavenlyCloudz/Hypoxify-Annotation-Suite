@@ -1,6 +1,6 @@
 """
-Hypoxify Annotation Suite - Standalone App
-Fixes for number_input validation and image display.
+Hypoxify Annotation Suite - With Click Visualization
+Shows clicks as dots on the image using matplotlib.
 """
 
 import streamlit as st
@@ -14,6 +14,10 @@ import io
 import re
 from typing import Dict, List, Optional, Tuple
 from scipy.ndimage import gaussian_filter
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+import matplotlib
+matplotlib.use('Agg')
 
 # =============================================================================
 # PAGE CONFIGURATION
@@ -63,6 +67,10 @@ st.markdown("""
     .stButton button {
         font-weight: 600;
         border-radius: 8px;
+    }
+    .click-label {
+        font-family: monospace;
+        font-size: 12px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -340,99 +348,45 @@ def auto_load(filepath):
         raise ValueError(f"Unsupported file format: {suffix}")
 
 # =============================================================================
-# EXPORT FUNCTIONS
+# VISUALIZATION FUNCTIONS
 # =============================================================================
 
-def get_bbox_from_mask(mask):
-    """Get bounding box from binary mask."""
-    mask = np.asarray(mask)
-    coords = np.argwhere(mask > 0)
-    if len(coords) == 0:
-        return (0, 0, 0, 0)
-    y_min, x_min = coords.min(axis=0)
-    y_max, x_max = coords.max(axis=0)
-    return (int(x_min), int(y_min), int(x_max), int(y_max))
-
-def to_coco_format(masks, image_ids, category_ids=None, image_shapes=None):
-    """Convert masks to COCO JSON format."""
-    if category_ids is None:
-        category_ids = [1] * len(masks)
+def draw_image_with_clicks(image: np.ndarray, foreground: List[Tuple[int, int]], 
+                          background: List[Tuple[int, int]]) -> np.ndarray:
+    """
+    Draw the image with click overlays using matplotlib.
+    Returns a numpy array of the figure.
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     
-    annotations = []
-    for idx, mask in enumerate(masks):
-        mask = np.asarray(mask)
-        h, w = mask.shape[:2] if image_shapes is None else image_shapes[idx]
-        
-        x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
-        bbox_width = x_max - x_min
-        bbox_height = y_max - y_min
-        
-        annotations.append({
-            "id": idx,
-            "image_id": image_ids[idx],
-            "category_id": category_ids[idx],
-            "bbox": [x_min, y_min, bbox_width, bbox_height],
-            "area": int(np.sum(mask)),
-            "iscrowd": 0,
-        })
+    # Display the image
+    ax.imshow(image, cmap='gray' if image.ndim == 2 else None)
     
-    return {
-        "images": [
-            {"id": img_id, "width": w, "height": h}
-            for img_id, (h, w) in zip(image_ids, image_shapes or [])
-        ],
-        "annotations": annotations,
-        "categories": [{"id": 1, "name": "lesion"}, {"id": 2, "name": "tumor"}],
-    }
-
-def to_yolo_format(masks, image_shapes, class_ids=None):
-    """Convert masks to YOLO TXT format."""
-    if class_ids is None:
-        class_ids = [0] * len(masks)
+    # Draw foreground clicks (blue circles with numbers)
+    for i, (x, y) in enumerate(foreground):
+        circle = Circle((x, y), 5, color='blue', fill=True, alpha=0.8)
+        ax.add_patch(circle)
+        ax.text(x + 8, y + 8, str(i+1), color='blue', fontsize=10, 
+                fontweight='bold', bbox=dict(facecolor='white', alpha=0.7))
     
-    yolo_lines = []
-    for mask, (h, w), class_id in zip(masks, image_shapes, class_ids):
-        mask = np.asarray(mask)
-        x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
-        
-        x_center = ((x_min + x_max) / 2) / w
-        y_center = ((y_min + y_max) / 2) / h
-        bbox_width = (x_max - x_min) / w
-        bbox_height = (y_max - y_min) / h
-        
-        yolo_lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {bbox_width:.6f} {bbox_height:.6f}")
+    # Draw background clicks (red circles with numbers)
+    for i, (x, y) in enumerate(background):
+        circle = Circle((x, y), 5, color='red', fill=True, alpha=0.8)
+        ax.add_patch(circle)
+        ax.text(x + 8, y + 8, str(i+1), color='red', fontsize=10, 
+                fontweight='bold', bbox=dict(facecolor='white', alpha=0.7))
     
-    return yolo_lines
-
-def to_monai_format(masks, image_ids, category_ids=None):
-    """Convert masks to MONAI format."""
-    if category_ids is None:
-        category_ids = [1] * len(masks)
+    ax.set_title(f"Image with Clicks (Blue: Foreground {len(foreground)}, Red: Background {len(background)})")
+    ax.axis('off')
+    plt.tight_layout()
     
-    monai_output = []
-    for mask, img_id, cat_id in zip(masks, image_ids, category_ids):
-        mask = np.asarray(mask)
-        mask_flat = mask.flatten()
-        rle = []
-        prev = None
-        count = 0
-        for val in mask_flat:
-            if val == prev:
-                count += 1
-            else:
-                if prev is not None:
-                    rle.append(count)
-                prev = val
-                count = 1
-        rle.append(count)
-        
-        monai_output.append({
-            "image_id": img_id,
-            "label": cat_id,
-            "segmentation": {"counts": rle, "size": list(mask.shape)},
-        })
+    # Convert to numpy array
+    fig.canvas.draw()
+    img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    img_array = img_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close(fig)
     
-    return monai_output
+    return img_array
 
 # =============================================================================
 # SAM WRAPPER (Mock mode for deployment)
@@ -552,6 +506,101 @@ class SAMWrapper:
                     mask[i, j] = 1
         
         return mask
+
+# =============================================================================
+# EXPORT FUNCTIONS
+# =============================================================================
+
+def get_bbox_from_mask(mask):
+    """Get bounding box from binary mask."""
+    mask = np.asarray(mask)
+    coords = np.argwhere(mask > 0)
+    if len(coords) == 0:
+        return (0, 0, 0, 0)
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+    return (int(x_min), int(y_min), int(x_max), int(y_max))
+
+def to_coco_format(masks, image_ids, category_ids=None, image_shapes=None):
+    """Convert masks to COCO JSON format."""
+    if category_ids is None:
+        category_ids = [1] * len(masks)
+    
+    annotations = []
+    for idx, mask in enumerate(masks):
+        mask = np.asarray(mask)
+        h, w = mask.shape[:2] if image_shapes is None else image_shapes[idx]
+        
+        x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
+        bbox_width = x_max - x_min
+        bbox_height = y_max - y_min
+        
+        annotations.append({
+            "id": idx,
+            "image_id": image_ids[idx],
+            "category_id": category_ids[idx],
+            "bbox": [x_min, y_min, bbox_width, bbox_height],
+            "area": int(np.sum(mask)),
+            "iscrowd": 0,
+        })
+    
+    return {
+        "images": [
+            {"id": img_id, "width": w, "height": h}
+            for img_id, (h, w) in zip(image_ids, image_shapes or [])
+        ],
+        "annotations": annotations,
+        "categories": [{"id": 1, "name": "lesion"}, {"id": 2, "name": "tumor"}],
+    }
+
+def to_yolo_format(masks, image_shapes, class_ids=None):
+    """Convert masks to YOLO TXT format."""
+    if class_ids is None:
+        class_ids = [0] * len(masks)
+    
+    yolo_lines = []
+    for mask, (h, w), class_id in zip(masks, image_shapes, class_ids):
+        mask = np.asarray(mask)
+        x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
+        
+        x_center = ((x_min + x_max) / 2) / w
+        y_center = ((y_min + y_max) / 2) / h
+        bbox_width = (x_max - x_min) / w
+        bbox_height = (y_max - y_min) / h
+        
+        yolo_lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {bbox_width:.6f} {bbox_height:.6f}")
+    
+    return yolo_lines
+
+def to_monai_format(masks, image_ids, category_ids=None):
+    """Convert masks to MONAI format."""
+    if category_ids is None:
+        category_ids = [1] * len(masks)
+    
+    monai_output = []
+    for mask, img_id, cat_id in zip(masks, image_ids, category_ids):
+        mask = np.asarray(mask)
+        mask_flat = mask.flatten()
+        rle = []
+        prev = None
+        count = 0
+        for val in mask_flat:
+            if val == prev:
+                count += 1
+            else:
+                if prev is not None:
+                    rle.append(count)
+                prev = val
+                count = 1
+        rle.append(count)
+        
+        monai_output.append({
+            "image_id": img_id,
+            "label": cat_id,
+            "segmentation": {"counts": rle, "size": list(mask.shape)},
+        })
+    
+    return monai_output
 
 # =============================================================================
 # SESSION STATE
@@ -791,19 +840,43 @@ with col1:
                         st.code(traceback.format_exc())
     
     # =========================================================================
-    # IMAGE DISPLAY
+    # IMAGE DISPLAY WITH CLICK VISUALIZATION
     # =========================================================================
     
-    st.markdown("### 🖼️ Image Display")
+    st.markdown("### 🖼️ Image with Click Visualization")
     
-    # FIX: Check if image is loaded using st.session_state
+    # Check if image is loaded
     if st.session_state.current_image is not None:
         img = st.session_state.current_image
+        
+        # Normalize image for display
         if img.dtype != np.uint8:
-            img = (img / img.max() * 255).astype(np.uint8)
+            img_display = (img / img.max() * 255).astype(np.uint8)
+        else:
+            img_display = img
         
-        st.image(img, use_container_width=True, caption="Click on the image to add points (use the input below)")
+        # Ensure 3-channel for display
+        if img_display.ndim == 2:
+            img_display = np.stack([img_display] * 3, axis=-1)
         
+        # Draw image with click overlays
+        if st.session_state.foreground_clicks or st.session_state.background_clicks:
+            with st.spinner("Rendering clicks..."):
+                try:
+                    image_with_clicks = draw_image_with_clicks(
+                        img_display,
+                        st.session_state.foreground_clicks,
+                        st.session_state.background_clicks
+                    )
+                    st.image(image_with_clicks, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Could not render click overlay: {e}")
+                    st.image(img_display, use_container_width=True)
+        else:
+            # Show plain image
+            st.image(img_display, use_container_width=True, caption="Add clicks below")
+        
+        # Click info
         st.markdown(f"""
         <div class="click-instruction">
             🔵 <b>Click Mode:</b> {st.session_state.click_mode.upper()}
@@ -819,7 +892,8 @@ with col1:
         """, unsafe_allow_html=True)
         
         # Manual coordinate input - FIXED with safe defaults
-        st.markdown("### 📍 Add Click")
+        st.markdown("### 📍 Add Click by Coordinates")
+        st.caption("Enter pixel coordinates (x, y) and click the button to add a point.")
         
         # Get valid max values (ensure they're at least 1)
         max_x = max(1, st.session_state.image_width - 1)
@@ -834,7 +908,8 @@ with col1:
                 min_value=0, 
                 max_value=max_x, 
                 value=default_x, 
-                step=1
+                step=1,
+                key="x_coord_input"
             )
         with col_y:
             y_coord = st.number_input(
@@ -842,7 +917,8 @@ with col1:
                 min_value=0, 
                 max_value=max_y, 
                 value=default_y, 
-                step=1
+                step=1,
+                key="y_coord_input"
             )
         
         col_add_fg, col_add_bg = st.columns(2)
@@ -857,23 +933,27 @@ with col1:
                 st.session_state.current_mask = None
                 st.rerun()
         
-        # Show clicked points
+        # Show clicked points in a table format
         if st.session_state.foreground_clicks:
-            st.caption(f"🔵 Foreground: {len(st.session_state.foreground_clicks)} points")
-            st.code(str(st.session_state.foreground_clicks[-5:]) if len(st.session_state.foreground_clicks) > 5 else str(st.session_state.foreground_clicks))
-        if st.session_state.background_clicks:
-            st.caption(f"🔴 Background: {len(st.session_state.background_clicks)} points")
-            st.code(str(st.session_state.background_clicks[-5:]) if len(st.session_state.background_clicks) > 5 else str(st.session_state.background_clicks))
+            st.caption("🔵 Foreground Points (x, y):")
+            fg_str = ", ".join([f"({x},{y})" for x, y in st.session_state.foreground_clicks])
+            st.code(fg_str, language="text")
         
-        # Mask overlay
+        if st.session_state.background_clicks:
+            st.caption("🔴 Background Points (x, y):")
+            bg_str = ", ".join([f"({x},{y})" for x, y in st.session_state.background_clicks])
+            st.code(bg_str, language="text")
+        
+        # Mask overlay toggle
         if st.session_state.current_mask is not None:
             if st.checkbox("Show mask overlay"):
                 mask = st.session_state.current_mask
-                overlay = img.copy()
-                if overlay.ndim == 2:
-                    overlay = np.stack([overlay] * 3, axis=-1)
-                overlay[mask > 0, 0] = overlay[mask > 0, 0] * 0.5 + 200 * 0.5
-                st.image(overlay, use_container_width=True)
+                overlay = img_display.copy()
+                # Create red overlay
+                overlay[mask > 0, 0] = np.clip(overlay[mask > 0, 0] * 0.3 + 200, 0, 255)
+                overlay[mask > 0, 1] = overlay[mask > 0, 1] * 0.3
+                overlay[mask > 0, 2] = overlay[mask > 0, 2] * 0.3
+                st.image(overlay, use_container_width=True, caption="Mask Overlay")
     
     else:
         st.info("👆 Upload data to begin")
@@ -917,6 +997,7 @@ with col2:
     
     st.markdown("---")
     
+    # Generate mask
     if st.session_state.image_loaded:
         if len(st.session_state.foreground_clicks) > 0:
             if st.button("⚡ Generate Mask", type="primary", use_container_width=True):
@@ -1021,11 +1102,12 @@ with tab3:
     st.markdown("""
     ### 🔬 Hypoxify Annotation Suite
     
-    **Version:** 0.2.0
+    **Version:** 0.3.0
     
     **Features:**
     - Physics-informed segmentation for microwave/thermoacoustic imaging
     - Manual click input with coordinate selection
+    - **Click visualization with numbered dots**
     - Raw data reconstruction (S21 parameters)
     - Multiple export formats (COCO, YOLO, MONAI, PNG)
     
@@ -1040,7 +1122,7 @@ with tab3:
 
 st.markdown("---")
 st.caption(
-    "🔬 Hypoxify Annotation Suite v0.2.0 | "
+    "🔬 Hypoxify Annotation Suite v0.3.0 | "
     "Physics-informed segmentation | "
     "Data stored locally; no data uploaded to servers."
 )
