@@ -1,27 +1,103 @@
 """
 Hypoxify Annotation Suite - Standalone App
-Everything self-contained in one file for easy testing and deployment.
+Fully working with click detection, SAM integration, and logo.
 """
 
 import streamlit as st
 import numpy as np
 from PIL import Image
-import plotly.graph_objects as go
 import pandas as pd
 from pathlib import Path
 import tempfile
 import json
 import io
 import re
-import time
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional
 from scipy.ndimage import gaussian_filter
 
+# For click detection
+from streamlit_image_coordinates import streamlit_image_coordinates
+
 # =============================================================================
-# CONSTANTS - Directly defined here
+# PAGE CONFIGURATION (MUST BE FIRST)
 # =============================================================================
 
-# Microwave Imaging (2-3 GHz)
+st.set_page_config(
+    page_title="Hypoxify Annotation Suite",
+    page_icon="🔬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# =============================================================================
+# CUSTOM CSS
+# =============================================================================
+
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.8rem;
+        font-weight: 700;
+        color: #0d47a1;
+        margin-bottom: 0.2rem;
+    }
+    .sub-header {
+        font-size: 1.1rem;
+        color: #555;
+        margin-bottom: 1.5rem;
+    }
+    .logo-container {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+    }
+    .logo-text {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #0d47a1;
+        margin: 0;
+    }
+    .feature-card {
+        background-color: #f5f5f5;
+        border-radius: 10px;
+        padding: 15px;
+        margin: 5px 0;
+        border-left: 4px solid #0d47a1;
+    }
+    .stButton button {
+        font-weight: 600;
+        border-radius: 8px;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0;
+        padding: 10px 20px;
+        font-weight: 600;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #0d47a1;
+        color: white;
+    }
+    .click-instruction {
+        background-color: #e3f2fd;
+        padding: 10px;
+        border-radius: 8px;
+        font-size: 14px;
+        margin: 8px 0;
+    }
+    .click-count {
+        font-weight: bold;
+        color: #0d47a1;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
 MICROWAVE_CONFIG = {
     "start_freq_ghz": 2.0,
     "stop_freq_ghz": 3.0,
@@ -40,57 +116,38 @@ MICROWAVE_CONFIG = {
     },
 }
 
-# Physical constants
-C_MM_PER_PS = 0.3  # Speed of light in mm/ps
-DEFAULT_GRID_SIZE = 80
-GAUSSIAN_SIGMA = 2.0
-
-# Supported configurations
 SUPPORTED_CONFIGURATIONS = {
     "microwave_4_antenna": {
         "modality": "microwave",
         "description": "4-antenna microwave imaging system (S21)",
         "num_antennas": 4,
-        "antenna_positions": MICROWAVE_CONFIG["antenna_positions"],
-        "path_to_antenna_pair": MICROWAVE_CONFIG["path_to_antenna_pair"],
         "file_formats": [".csv", ".s2p", ".mat"],
     },
     "microwave_8_antenna": {
         "modality": "microwave",
         "description": "8-antenna microwave imaging system",
         "num_antennas": 8,
-        "antenna_positions": {
-            1: (-75, -40), 2: (-75, 40),
-            3: (-40, -75), 4: (40, -75),
-            5: (75, -40), 6: (75, 40),
-            7: (-40, 75), 8: (40, 75),
-        },
-        "path_to_antenna_pair": {
-            1: (1, 5), 2: (2, 6), 3: (3, 7), 4: (4, 8),
-            5: (1, 3), 6: (2, 4), 7: (5, 7), 8: (6, 8),
-        },
         "file_formats": [".csv", ".s2p", ".mat"],
     },
     "thermoacoustic_ring": {
         "modality": "thermoacoustic",
-        "description": "Ring-array thermoacoustic system (PATATO compatible)",
+        "description": "Ring-array thermoacoustic system",
         "num_detectors": 128,
-        "detector_radius_mm": 50,
         "file_formats": [".h5", ".mat"],
     },
     "mri": {
         "modality": "mri",
-        "description": "MRI DICOM/NIfTI (standard medical imaging)",
+        "description": "MRI DICOM/NIfTI",
         "file_formats": [".dcm", ".nii", ".nii.gz"],
     },
     "ct": {
         "modality": "ct",
-        "description": "CT DICOM/NIfTI (standard medical imaging)",
+        "description": "CT DICOM/NIfTI",
         "file_formats": [".dcm", ".nii", ".nii.gz"],
     },
     "histology": {
         "modality": "histology",
-        "description": "Histology slides (whole-slide images)",
+        "description": "Histology slides",
         "file_formats": [".svs", ".ndpi", ".tiff", ".png", ".jpg"],
     },
 }
@@ -99,39 +156,108 @@ EXPORT_FORMATS = {
     "coco": {"extension": ".json", "description": "COCO format for object detection"},
     "yolo": {"extension": ".txt", "description": "YOLO format for object detection"},
     "monai": {"extension": ".json", "description": "MONAI format for medical imaging"},
-    "nifti": {"extension": ".nii.gz", "description": "NIfTI format for volumetric data"},
     "png": {"extension": ".png", "description": "PNG mask format"},
-    "dicom_seg": {"extension": ".dcm", "description": "DICOM SEG format"},
 }
 
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
 
-def db_to_linear(db_values):
-    """Convert dB to linear magnitude."""
-    db_values = np.asarray(db_values)
-    return 10 ** (db_values / 10)
+def db_to_linear(db):
+    """Convert dB to linear magnitude (power ratio)"""
+    return 10 ** (db / 10)
 
-def linear_to_db(linear_values):
-    """Convert linear magnitude to dB."""
-    linear_values = np.asarray(linear_values)
-    linear_values = np.maximum(linear_values, 1e-12)
-    return 10 * np.log10(linear_values)
+def linear_to_db(linear):
+    """Convert linear magnitude to dB"""
+    linear = np.maximum(linear, 1e-12)
+    return 10 * np.log10(linear)
 
-def apply_background_subtraction(patient_s21_db, baseline_s21_db):
-    """Remove direct antenna coupling by subtracting baseline in linear domain."""
-    patient_s21_db = np.asarray(patient_s21_db)
-    baseline_s21_db = np.asarray(baseline_s21_db)
+def delay_and_sum_reconstruction(
+    s21_data: Dict[int, np.ndarray],
+    frequencies: np.ndarray,
+    baseline_data: Optional[Dict[int, np.ndarray]] = None,
+    grid_size: int = 80,
+    grid_extent: float = 100.0,
+    start_freq: float = 2.0,
+    stop_freq: float = 3.0,
+    num_points: int = 201,
+    sigma: float = 2.0
+) -> np.ndarray:
+    """
+    Reconstruct image using delay-and-sum beamforming.
+    This is the EXACT algorithm from your Pi code.
+    """
+    antenna_positions = {
+        1: (-75, 0),
+        2: (75, 0),
+        3: (0, -75),
+        4: (0, 75),
+    }
     
-    if len(patient_s21_db) != len(baseline_s21_db):
-        raise ValueError(f"Length mismatch: patient {len(patient_s21_db)} != baseline {len(baseline_s21_db)}")
+    path_to_antenna_pair = {
+        1: (1, 3),
+        2: (1, 4),
+        3: (2, 3),
+        4: (2, 4),
+    }
     
-    patient_linear = db_to_linear(patient_s21_db)
-    baseline_linear = db_to_linear(baseline_s21_db)
-    corrected_linear = patient_linear - baseline_linear
-    corrected_linear = np.maximum(corrected_linear, 1e-12)
-    return linear_to_db(corrected_linear)
+    x_grid = np.linspace(-grid_extent, grid_extent, grid_size)
+    y_grid = np.linspace(-grid_extent, grid_extent, grid_size)
+    X, Y = np.meshgrid(x_grid, y_grid)
+    
+    image = np.zeros((grid_size, grid_size))
+    c = 3e8
+    
+    START_FREQ_HZ = start_freq * 1e9
+    STOP_FREQ_HZ = stop_freq * 1e9
+    
+    num_paths_used = 0
+    
+    for path_num, s21_db in s21_data.items():
+        if path_num not in path_to_antenna_pair:
+            continue
+        
+        tx_ant, rx_ant = path_to_antenna_pair[path_num]
+        tx_pos = antenna_positions[tx_ant]
+        rx_pos = antenna_positions[rx_ant]
+        
+        s21_linear = db_to_linear(s21_db)
+        
+        if baseline_data and path_num in baseline_data:
+            baseline_linear = db_to_linear(baseline_data[path_num])
+            s21_linear = s21_linear - baseline_linear
+            s21_linear = np.maximum(s21_linear, 1e-12)
+        
+        for i in range(grid_size):
+            for j in range(grid_size):
+                point = (X[i, j], Y[i, j])
+                
+                d_tx = np.sqrt((tx_pos[0] - point[0])**2 + (tx_pos[1] - point[1])**2)
+                d_rx = np.sqrt((rx_pos[0] - point[0])**2 + (rx_pos[1] - point[1])**2)
+                total_dist = (d_tx + d_rx) / 1000
+                
+                delay = total_dist / c
+                
+                freq_idx = int(np.clip(delay * 1e9 / (STOP_FREQ_HZ / 1e9) * num_points, 0, num_points - 1))
+                freq_idx = min(freq_idx, len(s21_linear) - 1)
+                freq_idx = max(freq_idx, 0)
+                
+                image[i, j] += s21_linear[freq_idx]
+        
+        num_paths_used += 1
+    
+    if num_paths_used > 0:
+        image /= num_paths_used
+    else:
+        raise ValueError("No valid paths found in s21_data")
+    
+    image = gaussian_filter(image, sigma=sigma)
+    
+    if image.max() > 0:
+        image = np.clip(image, 0, np.percentile(image, 95))
+        image = (image / image.max()) * 255
+    
+    return image.astype(np.uint8)
 
 # =============================================================================
 # DATA LOADING FUNCTIONS
@@ -139,11 +265,10 @@ def apply_background_subtraction(patient_s21_db, baseline_s21_db):
 
 def load_s21_csv(filepath):
     """Load S21 data from CSV format."""
-    import pandas as pd
     path = Path(filepath)
     df = pd.read_csv(path)
     
-    # Try to find frequency column
+    # Find frequency column
     freq_col = None
     for col in df.columns:
         if 'freq' in col.lower() or 'ghz' in col.lower():
@@ -152,7 +277,7 @@ def load_s21_csv(filepath):
     if freq_col is None:
         raise ValueError(f"Frequency column not found. Available: {df.columns.tolist()}")
     
-    # Try to find S21 column
+    # Find S21 column
     s21_col = None
     for col in df.columns:
         if 's21' in col.lower() or 's_param' in col.lower():
@@ -164,9 +289,6 @@ def load_s21_csv(filepath):
     frequencies = df[freq_col].values.astype(np.float64)
     s21_db = df[s21_col].values.astype(np.float64)
     
-    if len(frequencies) != len(s21_db):
-        raise ValueError(f"Length mismatch: frequencies {len(frequencies)} != s21 {len(s21_db)}")
-    
     return frequencies, s21_db
 
 def load_s2p(filepath):
@@ -175,36 +297,22 @@ def load_s2p(filepath):
     frequencies = []
     s21_mag_linear = []
     
-    format_type = "ma"
-    with open(path, 'r') as f:
-        for line in f:
-            if line.startswith('#') and 'MA' in line.upper():
-                format_type = "ma"
-            elif line.startswith('#') and 'RI' in line.upper():
-                format_type = "ri"
-            elif not line.startswith('!') and not line.startswith('#'):
-                break
-    
     with open(path, 'r') as f:
         for line in f:
             if line.startswith('!') or line.startswith('#'):
                 continue
             parts = line.strip().split()
-            if len(parts) < 3:
-                continue
-            try:
-                freq_mhz = float(parts[0])
-                freq_ghz = freq_mhz / 1000.0
-                if format_type == "ma":
-                    mag = float(parts[1])
-                else:
+            if len(parts) >= 3:
+                try:
+                    freq_mhz = float(parts[0])
+                    freq_ghz = freq_mhz / 1000.0
                     real = float(parts[1])
                     imag = float(parts[2])
                     mag = np.sqrt(real**2 + imag**2)
-                s21_mag_linear.append(mag)
-                frequencies.append(freq_ghz)
-            except ValueError:
-                continue
+                    s21_mag_linear.append(mag)
+                    frequencies.append(freq_ghz)
+                except ValueError:
+                    continue
     
     if not frequencies:
         raise ValueError(f"No valid data found in {path}")
@@ -213,17 +321,17 @@ def load_s2p(filepath):
     return np.array(frequencies), s21_db
 
 def load_mat(filepath):
-    """Load MATLAB .mat file containing S21 data."""
+    """Load MATLAB .mat file."""
     try:
         from scipy.io import loadmat
     except ImportError:
-        raise ImportError("scipy.io required for .mat files. Install scipy: pip install scipy")
+        raise ImportError("scipy.io required for .mat files")
     
     path = Path(filepath)
     mat_data = loadmat(path)
     
-    freq_keys = ['frequencies', 'freq', 'f', 'Frequency_GHz', 'frequency']
-    s21_keys = ['S21_dB', 's21_db', 'S21', 'data', 's_params']
+    freq_keys = ['frequencies', 'freq', 'f', 'Frequency_GHz']
+    s21_keys = ['S21_dB', 's21_db', 'S21', 'data']
     
     frequencies = None
     s21_db = None
@@ -261,362 +369,7 @@ def auto_load(filepath):
     elif suffix == '.mat':
         return load_mat(path)
     else:
-        raise ValueError(f"Unsupported file format: {suffix}. Supported: .csv, .s2p, .mat")
-
-def load_multi_angle_scans(directory, angles=None):
-    """Load all rotation scans from a directory."""
-    if angles is None:
-        angles = [0, 120, 240]
-    
-    directory = Path(directory)
-    if not directory.exists():
-        raise FileNotFoundError(f"Directory not found: {directory}")
-    
-    all_data = {}
-    for angle in angles:
-        angle_data = {}
-        for path_num in [1, 2, 3, 4]:
-            pattern = f"path{path_num}_angle{angle}_*.csv"
-            files = list(directory.glob(pattern))
-            if files:
-                latest = max(files, key=lambda f: f.stat().st_mtime)
-                try:
-                    _, s21 = load_s21_csv(latest)
-                    angle_data[path_num] = s21
-                except Exception as e:
-                    print(f"Warning: Could not load {latest}: {e}")
-        if angle_data:
-            all_data[angle] = angle_data
-    return all_data
-
-# =============================================================================
-# RECONSTRUCTION FUNCTIONS (UPDATED WITH YOUR PI CODE)
-# =============================================================================
-
-def db_to_linear(db):
-    """Convert dB to linear magnitude (power ratio)"""
-    return 10 ** (db / 10)
-
-def linear_to_db(linear):
-    """Convert linear magnitude to dB"""
-    linear = np.maximum(linear, 1e-12)
-    return 10 * np.log10(linear)
-
-def delay_and_sum_reconstruction(
-    s21_data: Dict[int, np.ndarray],
-    frequencies: np.ndarray,
-    baseline_data: Optional[Dict[int, np.ndarray]] = None,
-    grid_size: int = 80,
-    grid_extent: float = 100.0,
-    start_freq: float = 2.0,
-    stop_freq: float = 3.0,
-    num_points: int = 201,
-    sigma: float = 2.0
-) -> np.ndarray:
-    """
-    Reconstruct image using delay-and-sum beamforming.
-    
-    This is the EXACT algorithm from your Pi code.
-    """
-    # Antenna positions from your Pi code
-    antenna_positions = {
-        1: (-75, 0),
-        2: (75, 0),
-        3: (0, -75),
-        4: (0, 75),
-    }
-    
-    path_to_antenna_pair = {
-        1: (1, 3),
-        2: (1, 4),
-        3: (2, 3),
-        4: (2, 4),
-    }
-    
-    # Grid for reconstruction
-    x_grid = np.linspace(-grid_extent, grid_extent, grid_size)
-    y_grid = np.linspace(-grid_extent, grid_extent, grid_size)
-    X, Y = np.meshgrid(x_grid, y_grid)
-    
-    image = np.zeros((grid_size, grid_size))
-    c = 3e8  # Speed of light in m/s
-    
-    # Frequency range parameters
-    START_FREQ_HZ = start_freq * 1e9
-    STOP_FREQ_HZ = stop_freq * 1e9
-    
-    num_paths_used = 0
-    
-    for path_num, s21_db in s21_data.items():
-        if path_num not in path_to_antenna_pair:
-            continue
-        
-        # Get antenna positions
-        tx_ant, rx_ant = path_to_antenna_pair[path_num]
-        tx_pos = antenna_positions[tx_ant]
-        rx_pos = antenna_positions[rx_ant]
-        
-        # Convert to linear domain
-        s21_linear = db_to_linear(s21_db)
-        
-        # Apply background subtraction if available (linear domain)
-        if baseline_data and path_num in baseline_data:
-            baseline_linear = db_to_linear(baseline_data[path_num])
-            s21_linear = s21_linear - baseline_linear
-            s21_linear = np.maximum(s21_linear, 1e-12)
-        
-        # Delay-and-sum for each point in grid
-        for i in range(grid_size):
-            for j in range(grid_size):
-                point = (X[i, j], Y[i, j])
-                
-                # Calculate distances (in mm)
-                d_tx = np.sqrt((tx_pos[0] - point[0])**2 + (tx_pos[1] - point[1])**2)
-                d_rx = np.sqrt((rx_pos[0] - point[0])**2 + (rx_pos[1] - point[1])**2)
-                total_dist = (d_tx + d_rx) / 1000  # Convert mm to meters
-                
-                # Calculate delay in seconds
-                delay = total_dist / c
-                
-                # Frequency index mapping from your Pi code
-                freq_idx = int(np.clip(delay * 1e9 / (STOP_FREQ_HZ / 1e9) * num_points, 0, num_points - 1))
-                
-                # Clamp to valid range
-                freq_idx = min(freq_idx, len(s21_linear) - 1)
-                freq_idx = max(freq_idx, 0)
-                
-                # Add contribution
-                image[i, j] += s21_linear[freq_idx]
-        
-        num_paths_used += 1
-    
-    # Average across paths
-    if num_paths_used > 0:
-        image /= num_paths_used
-    else:
-        raise ValueError("No valid paths found in s21_data")
-    
-    # Apply Gaussian smoothing
-    from scipy.ndimage import gaussian_filter
-    image = gaussian_filter(image, sigma=sigma)
-    
-    # Normalize to 0-255
-    if image.max() > 0:
-        # Clip to 95th percentile to handle outliers
-        image = np.clip(image, 0, np.percentile(image, 95))
-        image = (image / image.max()) * 255
-    
-    return image.astype(np.uint8)
-
-
-def reconstruct_from_multi_angle(
-    angle_data: Dict[int, Dict[int, np.ndarray]],
-    frequencies: np.ndarray,
-    baseline_data: Optional[Dict[int, np.ndarray]] = None,
-    grid_size: int = 80
-) -> np.ndarray:
-    """
-    Reconstruct image by averaging across multiple rotation angles.
-    """
-    images = []
-    
-    for angle, s21_data in angle_data.items():
-        image = delay_and_sum_reconstruction(
-            s21_data=s21_data,
-            frequencies=frequencies,
-            baseline_data=baseline_data,
-            grid_size=grid_size
-        )
-        images.append(image)
-    
-    if not images:
-        raise ValueError("No images were reconstructed from angle_data")
-    
-    # Average across angles
-    avg_image = np.mean(images, axis=0)
-    return avg_image.astype(np.uint8)
-
-# =============================================================================
-# SAM WRAPPER (Mock for testing without SAM installed)
-# =============================================================================
-
-class MockSAMWrapper:
-    """Mock SAM wrapper that generates simple circular masks for testing."""
-    
-    def __init__(self, model_type="vit_b", checkpoint_path=None, device="auto"):
-        self.model_type = model_type
-        self.device = device
-        self._image = None
-        self._loaded = True
-        print(f"Mock SAM initialized (simulation mode)")
-    
-    def set_image(self, image):
-        """Store image for reference."""
-        image = np.asarray(image)
-        if image.ndim == 2:
-            image = np.stack([image] * 3, axis=-1)
-        self._image = image
-        print(f"Image set: shape={self._image.shape}")
-    
-    def from_clicks(self, foreground, background=None, multimask=False):
-        """Generate a circular mask centered on the first foreground click."""
-        if self._image is None:
-            raise RuntimeError("No image set. Call set_image first.")
-        
-        if not foreground:
-            raise ValueError("At least one foreground click is required")
-        
-        h, w = self._image.shape[:2]
-        mask = np.zeros((h, w), dtype=np.uint8)
-        
-        # Create circular mask centered on first foreground click
-        cx, cy = foreground[0]
-        radius = min(h, w) // 5
-        
-        for i in range(h):
-            for j in range(w):
-                if (i - cy)**2 + (j - cx)**2 < radius**2:
-                    mask[i, j] = 1
-        
-        return mask
-    
-    def from_box(self, box, multimask=False):
-        """Generate mask from bounding box."""
-        if self._image is None:
-            raise RuntimeError("No image set. Call set_image first.")
-        
-        x_min, y_min, x_max, y_max = box
-        h, w = self._image.shape[:2]
-        mask = np.zeros((h, w), dtype=np.uint8)
-        
-        for i in range(max(0, y_min), min(h, y_max)):
-            for j in range(max(0, x_min), min(w, x_max)):
-                mask[i, j] = 1
-        
-        return mask
-
-# Try to import real SAM, fallback to mock
-try:
-    from segment_anything import sam_model_registry, SamPredictor
-    SAM_AVAILABLE = True
-    print("SAM loaded successfully")
-except ImportError:
-    SAM_AVAILABLE = False
-    print("SAM not installed. Using mock segmentation.")
-
-class SAMWrapper:
-    """Real or mock SAM wrapper based on availability."""
-    
-    def __init__(self, model_type="vit_b", checkpoint_path=None, device="auto"):
-        if not SAM_AVAILABLE:
-            self._mock = MockSAMWrapper(model_type, checkpoint_path, device)
-            self._use_mock = True
-            self._loaded = True
-            return
-        
-        self._use_mock = False
-        self.model_type = model_type
-        self.device = device
-        self.predictor = None
-        self._image = None
-        self._loaded = False
-        
-        # Try to load real SAM
-        if checkpoint_path is None:
-            default_paths = [
-                Path("sam_vit_b.pth"),
-                Path.home() / ".cache" / "sam" / "sam_vit_b.pth",
-            ]
-            for p in default_paths:
-                if p.exists():
-                    checkpoint_path = p
-                    break
-        
-        if checkpoint_path is None or not Path(checkpoint_path).exists():
-            print(f"SAM checkpoint not found. Using mock segmentation.")
-            self._mock = MockSAMWrapper(model_type, checkpoint_path, device)
-            self._use_mock = True
-            self._loaded = True
-            return
-        
-        try:
-            import torch
-            if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            
-            sam = sam_model_registry[model_type](checkpoint=str(checkpoint_path))
-            sam.to(device=device)
-            self.predictor = SamPredictor(sam)
-            self._loaded = True
-            self._use_mock = False
-            print(f"SAM loaded: {model_type} on {device}")
-        except Exception as e:
-            print(f"Failed to load SAM: {e}. Using mock segmentation.")
-            self._mock = MockSAMWrapper(model_type, checkpoint_path, device)
-            self._use_mock = True
-            self._loaded = True
-    
-    @property
-    def loaded(self):
-        return self._loaded
-    
-    def set_image(self, image):
-        if self._use_mock:
-            return self._mock.set_image(image)
-        
-        image = np.asarray(image)
-        if image.ndim == 2:
-            image = np.stack([image] * 3, axis=-1)
-        self._image = image
-        self.predictor.set_image(image)
-    
-    def from_clicks(self, foreground, background=None, multimask=False):
-        if self._use_mock:
-            return self._mock.from_clicks(foreground, background, multimask)
-        
-        if not foreground:
-            raise ValueError("At least one foreground click is required")
-        
-        points = []
-        labels = []
-        for x, y in foreground:
-            points.append([x, y])
-            labels.append(1)
-        if background:
-            for x, y in background:
-                points.append([x, y])
-                labels.append(0)
-        
-        points = np.array(points)
-        labels = np.array(labels)
-        
-        masks, scores, logits = self.predictor.predict(
-            point_coords=points,
-            point_labels=labels,
-            multimask_output=multimask
-        )
-        
-        if multimask:
-            return [mask.astype(np.uint8) for mask in masks]
-        else:
-            best_idx = np.argmax(scores)
-            return masks[best_idx].astype(np.uint8)
-    
-    def from_box(self, box, multimask=False):
-        if self._use_mock:
-            return self._mock.from_box(box, multimask)
-        
-        box = np.array(box)
-        masks, scores, logits = self.predictor.predict(
-            box=box,
-            multimask_output=multimask
-        )
-        
-        if multimask:
-            return [mask.astype(np.uint8) for mask in masks]
-        else:
-            best_idx = np.argmax(scores)
-            return masks[best_idx].astype(np.uint8)
+        raise ValueError(f"Unsupported file format: {suffix}")
 
 # =============================================================================
 # EXPORT FUNCTIONS
@@ -625,34 +378,26 @@ class SAMWrapper:
 def get_bbox_from_mask(mask):
     """Get bounding box from binary mask."""
     mask = np.asarray(mask)
-    if mask.ndim != 2:
-        raise ValueError(f"Mask must be 2D, got shape {mask.shape}")
-    
     coords = np.argwhere(mask > 0)
     if len(coords) == 0:
         return (0, 0, 0, 0)
-    
     y_min, x_min = coords.min(axis=0)
     y_max, x_max = coords.max(axis=0)
     return (int(x_min), int(y_min), int(x_max), int(y_max))
 
 def mask_to_polygon(mask, tolerance=2.0):
-    """Convert binary mask to polygon using OpenCV."""
+    """Convert binary mask to polygon."""
     try:
         import cv2
     except ImportError:
         return []
     
     mask = np.asarray(mask)
-    if mask.ndim != 2:
-        return []
-    
     contours, _ = cv2.findContours(
         mask.astype(np.uint8),
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
-    
     if not contours:
         return []
     
@@ -716,7 +461,7 @@ def to_yolo_format(masks, image_shapes, class_ids=None):
     return yolo_lines
 
 def to_monai_format(masks, image_ids, category_ids=None):
-    """Convert masks to MONAI format (simplified RLE)."""
+    """Convert masks to MONAI format."""
     if category_ids is None:
         category_ids = [1] * len(masks)
     
@@ -746,28 +491,128 @@ def to_monai_format(masks, image_ids, category_ids=None):
     return monai_output
 
 # =============================================================================
-# PAGE CONFIGURATION
+# SAM WRAPPER (With real SAM support)
 # =============================================================================
 
-st.set_page_config(
-    page_title="Hypoxify Annotation Suite",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+SAM_AVAILABLE = False
+try:
+    from segment_anything import sam_model_registry, SamPredictor
+    SAM_AVAILABLE = True
+    print("✅ SAM loaded successfully")
+except ImportError:
+    print("⚠️ SAM not installed. Using mock segmentation.")
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header { font-size: 2.5rem; font-weight: 700; color: #0d47a1; margin-bottom: 0.5rem; }
-    .sub-header { font-size: 1.1rem; color: #555; margin-bottom: 1.5rem; }
-    .feature-card { background-color: #f5f5f5; border-radius: 10px; padding: 15px; margin: 5px 0; border-left: 4px solid #0d47a1; }
-    .stButton button { font-weight: 600; border-radius: 8px; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { border-radius: 8px 8px 0 0; padding: 10px 20px; font-weight: 600; }
-    .stTabs [aria-selected="true"] { background-color: #0d47a1; color: white; }
-</style>
-""", unsafe_allow_html=True)
+class SAMWrapper:
+    """Real or mock SAM wrapper based on availability."""
+    
+    def __init__(self, model_type="vit_b", checkpoint_path=None, device="auto"):
+        self._image = None
+        self._use_mock = True
+        self._loaded = False
+        
+        if not SAM_AVAILABLE:
+            self._use_mock = True
+            self._loaded = True
+            print("Using mock SAM (real SAM not installed)")
+            return
+        
+        # Try to find checkpoint
+        if checkpoint_path is None:
+            default_paths = [
+                Path("sam_vit_b.pth"),
+                Path.home() / ".cache" / "sam" / "sam_vit_b.pth",
+                Path.home() / "sam" / "sam_vit_b.pth",
+            ]
+            for p in default_paths:
+                if p.exists():
+                    checkpoint_path = p
+                    break
+        
+        if checkpoint_path is None or not Path(checkpoint_path).exists():
+            self._use_mock = True
+            self._loaded = True
+            print("SAM checkpoint not found. Using mock segmentation.")
+            return
+        
+        try:
+            import torch
+            if device == "auto":
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            sam = sam_model_registry[model_type](checkpoint=str(checkpoint_path))
+            sam.to(device=device)
+            self.predictor = SamPredictor(sam)
+            self._loaded = True
+            self._use_mock = False
+            print(f"✅ SAM loaded: {model_type} on {device}")
+        except Exception as e:
+            print(f"Failed to load SAM: {e}. Using mock segmentation.")
+            self._use_mock = True
+            self._loaded = True
+    
+    def set_image(self, image):
+        """Set image for segmentation."""
+        image = np.asarray(image)
+        if image.ndim == 2:
+            image = np.stack([image] * 3, axis=-1)
+        self._image = image
+        
+        if not self._use_mock and hasattr(self, 'predictor'):
+            self.predictor.set_image(image)
+    
+    def from_clicks(self, foreground, background=None, multimask=False):
+        """Generate mask from clicks."""
+        if self._use_mock:
+            return self._mock_from_clicks(foreground, background)
+        
+        if not foreground:
+            raise ValueError("At least one foreground click is required")
+        
+        points = []
+        labels = []
+        for x, y in foreground:
+            points.append([x, y])
+            labels.append(1)
+        if background:
+            for x, y in background:
+                points.append([x, y])
+                labels.append(0)
+        
+        points = np.array(points)
+        labels = np.array(labels)
+        
+        masks, scores, logits = self.predictor.predict(
+            point_coords=points,
+            point_labels=labels,
+            multimask_output=multimask
+        )
+        
+        if multimask:
+            return [mask.astype(np.uint8) for mask in masks]
+        else:
+            best_idx = np.argmax(scores)
+            return masks[best_idx].astype(np.uint8)
+    
+    def _mock_from_clicks(self, foreground, background=None):
+        """Mock segmentation: circular mask centered on first click."""
+        if self._image is None:
+            raise RuntimeError("No image set")
+        
+        h, w = self._image.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        if not foreground:
+            return mask
+        
+        cx, cy = foreground[0]
+        radius = min(h, w) // 6
+        
+        for i in range(h):
+            for j in range(w):
+                if (i - cy)**2 + (j - cx)**2 < radius**2:
+                    mask[i, j] = 1
+        
+        return mask
 
 # =============================================================================
 # SESSION STATE INITIALIZATION
@@ -799,13 +644,26 @@ if "masks_history" not in st.session_state:
     st.session_state.masks_history = []
 if "export_ready" not in st.session_state:
     st.session_state.export_ready = False
+if "click_mode" not in st.session_state:
+    st.session_state.click_mode = "foreground"
 
 # =============================================================================
 # SIDEBAR - CONFIGURATION AND CONTROLS
 # =============================================================================
 
 with st.sidebar:
-    st.markdown("## ⚙️ Configuration")
+    # LOGO
+    logo_path = Path("Hypoxify Logo.png")
+    if logo_path.exists():
+        try:
+            logo = Image.open(logo_path)
+            st.image(logo, use_container_width=True)
+        except:
+            st.markdown("## 🔬 Hypoxify")
+    else:
+        st.markdown("## 🔬 Hypoxify")
+    
+    st.markdown("### ⚙️ Configuration")
     
     config_names = list(SUPPORTED_CONFIGURATIONS.keys())
     config_labels = {
@@ -817,17 +675,8 @@ with st.sidebar:
         "Select System Configuration",
         options=config_names,
         format_func=lambda x: config_labels[x],
-        index=config_names.index(st.session_state.selected_config) if st.session_state.selected_config in config_names else 0,
-        help="Select the imaging system configuration matching your data"
+        index=0
     )
-    
-    if selected_config != st.session_state.selected_config:
-        st.session_state.selected_config = selected_config
-        st.session_state.foreground_clicks = []
-        st.session_state.background_clicks = []
-        st.session_state.current_mask = None
-        st.session_state.reconstructed_image = None
-        st.session_state.image_loaded = False
     
     st.markdown("---")
     
@@ -835,23 +684,18 @@ with st.sidebar:
     mode = st.radio(
         "How are you uploading your data?",
         options=["Upload Image (PNG/JPG/TIFF)", "Upload Raw Data (CSV/S2P/MAT)"],
-        index=0,
-        help="Direct image upload works for any image. Raw data will be reconstructed first."
+        index=0
     )
-    
-    if "Raw" in mode:
-        st.session_state.mode = "raw_reconstruct"
-    else:
-        st.session_state.mode = "direct_image"
     
     st.markdown("---")
     
     st.markdown("### 🎯 Segmentation Settings")
-    sam_model = st.selectbox(
-        "SAM Model",
-        options=["vit_b", "vit_l", "vit_h"],
-        index=0,
-        help="vit_b is fastest, vit_h is most accurate but slower"
+    sam_model = st.selectbox("SAM Model", options=["vit_b", "vit_l", "vit_h"], index=0)
+    
+    use_physics_guidance = st.checkbox(
+        "🧬 Physics-Guided Segmentation",
+        value=False,
+        help="Use physical features to guide SAM (requires raw data)"
     )
     
     st.markdown("---")
@@ -870,29 +714,40 @@ with st.sidebar:
         else:
             st.warning("Please generate a mask first.")
     
-    # Show SAM status
+    # SAM Status
     st.markdown("---")
     if SAM_AVAILABLE:
-        st.success("✅ SAM installed (real mode)")
+        st.success("✅ SAM installed")
     else:
-        st.info("ℹ️ SAM not installed (using mock segmentation)")
+        st.info("ℹ️ SAM not installed (using mock)")
 
 # =============================================================================
-# MAIN CONTENT AREA
+# MAIN HEADER WITH LOGO
 # =============================================================================
 
-st.markdown('<p class="main-header">🔬 Hypoxify Annotation Suite</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Physics-informed segmentation for microwave and thermoacoustic imaging</p>', unsafe_allow_html=True)
+col_logo1, col_logo2 = st.columns([1, 5])
+
+with col_logo1:
+    if logo_path.exists():
+        try:
+            logo = Image.open(logo_path)
+            st.image(logo, width=80)
+        except:
+            st.markdown("🔬")
+
+with col_logo2:
+    st.markdown('<p class="main-header">Hypoxify Annotation Suite</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Physics-informed segmentation for microwave and thermoacoustic imaging</p>', unsafe_allow_html=True)
+
+# =============================================================================
+# MAIN CONTENT
+# =============================================================================
 
 config = SUPPORTED_CONFIGURATIONS[st.session_state.selected_config]
 st.info(
     f"**Active Configuration:** {config['modality'].title()} - {config['description']}\n\n"
     f"**Supported Formats:** {', '.join(config['file_formats'])}"
 )
-
-# =============================================================================
-# TWO-COLUMN LAYOUT
-# =============================================================================
 
 col1, col2 = st.columns([1, 1])
 
@@ -903,10 +758,10 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.markdown("## 📷 Input Data")
     
-    if st.session_state.mode == "direct_image":
+    if mode == "Upload Image (PNG/JPG/TIFF)":
         uploaded_file = st.file_uploader(
             "Upload Image",
-            type=["png", "jpg", "jpeg", "tiff", "bmp", "dcm"],
+            type=["png", "jpg", "jpeg", "tiff", "bmp"],
             help="Upload a reconstructed image for annotation"
         )
         
@@ -918,12 +773,10 @@ with col1:
                     image_array = np.stack([image_array] * 3, axis=-1)
                 st.session_state.current_image = image_array
                 st.session_state.image_loaded = True
-                st.session_state.reconstructed_image = None
                 st.session_state.foreground_clicks = []
                 st.session_state.background_clicks = []
                 st.session_state.current_mask = None
-                st.write(f"**Image shape:** {image_array.shape}")
-                st.write(f"**Data type:** {image_array.dtype}")
+                st.success(f"✅ Loaded: {uploaded_file.name} ({image_array.shape})")
             except Exception as e:
                 st.error(f"Error loading image: {e}")
     
@@ -932,7 +785,14 @@ with col1:
             "Upload Raw Data Files",
             type=["csv", "s2p", "mat"],
             accept_multiple_files=True,
-            help="Upload S21 parameter files."
+            help="Upload S21 parameter files. For multi-angle data, upload all files."
+        )
+        
+        # Baseline upload
+        baseline_file = st.file_uploader(
+            "Upload Baseline (Air) Scan (Optional)",
+            type=["csv", "s2p", "mat"],
+            help="Upload a baseline scan for background subtraction"
         )
         
         if uploaded_files:
@@ -948,6 +808,14 @@ with col1:
                             temp_path.write_bytes(f.read())
                             file_paths.append(temp_path)
                         
+                        # Load baseline if provided
+                        baseline_data = None
+                        if baseline_file:
+                            baseline_path = Path(temp_dir) / baseline_file.name
+                            baseline_path.write_bytes(baseline_file.read())
+                            baseline_freq, baseline_s21 = auto_load(baseline_path)
+                            baseline_data = {1: baseline_s21}
+                        
                         if len(file_paths) == 1:
                             frequencies, s21_data = auto_load(file_paths[0])
                             s21_data_dict = {1: s21_data}
@@ -961,14 +829,22 @@ with col1:
                                     s21_data_dict[path_num] = s21
                             frequencies, _ = auto_load(file_paths[0])
                         
+                        # Get frequency range from data
+                        start_freq = float(frequencies[0])
+                        stop_freq = float(frequencies[-1])
+                        num_points = len(frequencies)
+                        
                         image = delay_and_sum_reconstruction(
-                            s21_data_dict,
-                            frequencies,
+                            s21_data=s21_data_dict,
+                            frequencies=frequencies,
+                            baseline_data=baseline_data,
                             grid_size=80,
-                            grid_extent=100.0
+                            grid_extent=100.0,
+                            start_freq=start_freq,
+                            stop_freq=stop_freq,
+                            num_points=num_points
                         )
                         
-                        st.session_state.reconstructed_image = image
                         st.session_state.current_image = image
                         st.session_state.image_loaded = True
                         st.session_state.foreground_clicks = []
@@ -977,26 +853,62 @@ with col1:
                         st.session_state.frequencies = frequencies
                         st.session_state.raw_data = s21_data_dict
                         
-                        st.success("Reconstruction complete!")
+                        st.success("✅ Reconstruction complete!")
                     except Exception as e:
                         st.error(f"Reconstruction error: {e}")
                         import traceback
                         st.code(traceback.format_exc())
     
-    # Display current image
-    st.markdown("### 🖼️ Current Image")
+    # =========================================================================
+    # IMAGE DISPLAY WITH CLICK DETECTION
+    # =========================================================================
+    
+    st.markdown("### 🖼️ Image with Click Detection")
     
     if st.session_state.current_image is not None:
         img = st.session_state.current_image
         if img.dtype != np.uint8:
             img = (img / img.max() * 255).astype(np.uint8)
-        st.image(img, use_container_width=True, clamp=True)
         
-        if st.session_state.foreground_clicks:
-            st.caption(f"🔵 Foreground clicks: {len(st.session_state.foreground_clicks)}")
-        if st.session_state.background_clicks:
-            st.caption(f"🔴 Background clicks: {len(st.session_state.background_clicks)}")
+        # Display click mode
+        st.markdown(f"""
+        <div class="click-instruction">
+            🔵 <b>Click Mode:</b> {st.session_state.click_mode.upper()}
+            {' (Click on image to add)' if st.session_state.click_mode == 'foreground' else ' (Click to remove area)'}
+        </div>
+        """, unsafe_allow_html=True)
         
+        # Click count display
+        st.markdown(f"""
+        <div class="click-count">
+            Foreground clicks: {len(st.session_state.foreground_clicks)} | 
+            Background clicks: {len(st.session_state.background_clicks)}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Display the image with click detection
+        result = streamlit_image_coordinates(
+            img,
+            key="image_click",
+            click_event=True,
+            use_container_width=True
+        )
+        
+        # Handle click
+        if result is not None and result.get('type') == 'click':
+            x = int(result['x'])
+            y = int(result['y'])
+            
+            if st.session_state.click_mode == "foreground":
+                st.session_state.foreground_clicks.append((x, y))
+            else:
+                st.session_state.background_clicks.append((x, y))
+            
+            # Clear mask when new clicks are added
+            st.session_state.current_mask = None
+            st.rerun()
+        
+        # Show mask overlay if exists
         if st.session_state.current_mask is not None:
             if st.checkbox("Show mask overlay"):
                 mask = st.session_state.current_mask
@@ -1006,7 +918,12 @@ with col1:
                 overlay[mask > 0, 0] = overlay[mask > 0, 0] * 0.5 + 200 * 0.5
                 st.image(overlay, use_container_width=True)
         
-        st.caption("💡 Click on image below to add foreground points. Right-click for background.")
+        # Show clicked points
+        if st.session_state.foreground_clicks:
+            st.caption(f"🔵 Foreground: {len(st.session_state.foreground_clicks)} points")
+        if st.session_state.background_clicks:
+            st.caption(f"🔴 Background: {len(st.session_state.background_clicks)} points")
+    
     else:
         st.info("👆 Upload data to begin")
 
@@ -1017,15 +934,30 @@ with col1:
 with col2:
     st.markdown("## 🎯 Segmentation")
     
-    col_reset, col_undo = st.columns(2)
+    # Click mode toggle
+    col_mode1, col_mode2, col_reset, col_undo = st.columns([1, 1, 1, 1])
+    
+    with col_mode1:
+        if st.button("🔵 Foreground", use_container_width=True, 
+                     type="primary" if st.session_state.click_mode == "foreground" else "secondary"):
+            st.session_state.click_mode = "foreground"
+            st.rerun()
+    
+    with col_mode2:
+        if st.button("🔴 Background", use_container_width=True,
+                     type="primary" if st.session_state.click_mode == "background" else "secondary"):
+            st.session_state.click_mode = "background"
+            st.rerun()
+    
     with col_reset:
-        if st.button("🔄 Reset All Clicks", use_container_width=True):
+        if st.button("🔄 Reset All", use_container_width=True):
             st.session_state.foreground_clicks = []
             st.session_state.background_clicks = []
             st.session_state.current_mask = None
             st.rerun()
+    
     with col_undo:
-        if st.button("↩️ Undo Last Click", use_container_width=True):
+        if st.button("↩️ Undo Last", use_container_width=True):
             if st.session_state.background_clicks:
                 st.session_state.background_clicks.pop()
             elif st.session_state.foreground_clicks:
@@ -1033,20 +965,16 @@ with col2:
             st.session_state.current_mask = None
             st.rerun()
     
-    click_mode = st.radio(
-        "Click Mode",
-        ["Foreground (tumor)", "Background (remove)"],
-        horizontal=True,
-        key="click_mode_radio"
-    )
+    st.markdown("---")
     
+    # Generate mask
     if st.session_state.image_loaded:
         if len(st.session_state.foreground_clicks) > 0:
             if st.button("⚡ Generate Mask", type="primary", use_container_width=True):
                 with st.spinner("Segmenting..."):
                     try:
+                        # Initialize SAM
                         if st.session_state.segmenter is None:
-                            # Auto-detect checkpoint
                             checkpoint_path = None
                             for p in [Path("sam_vit_b.pth"), Path.home() / ".cache" / "sam" / "sam_vit_b.pth"]:
                                 if p.exists():
@@ -1064,18 +992,21 @@ with col2:
                         )
                         st.session_state.current_mask = mask
                         st.session_state.masks_history.append(mask)
-                        st.success("Mask generated!")
+                        st.success("✅ Mask generated!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Segmentation error: {e}")
                         import traceback
                         st.code(traceback.format_exc())
         else:
-            st.info("Add at least one foreground click (blue dot) to generate a mask.")
+            st.info("👉 Add at least one foreground click to generate a mask.")
     else:
-        st.info("Load an image first.")
+        st.info("📤 Load an image first.")
     
-    # Mask display
+    # =========================================================================
+    # MASK DISPLAY
+    # =========================================================================
+    
     st.markdown("### 🧬 Mask Result")
     
     if st.session_state.current_mask is not None:
@@ -1084,7 +1015,7 @@ with col2:
         
         mask_area = np.sum(mask)
         mask_percent = (mask_area / mask.size) * 100
-        st.caption(f"Mask area: {mask_area} pixels ({mask_percent:.2f}% of image)")
+        st.caption(f"Mask area: {mask_area} pixels ({mask_percent:.2f}%)")
         
         st.markdown("### 📤 Export")
         
@@ -1110,14 +1041,14 @@ with col2:
             st.session_state.export_ready = False
             st.rerun()
     else:
-        st.info("🔄 No mask generated yet. Add clicks and click 'Generate Mask'.")
+        st.info("🔄 No mask generated yet.")
 
 # =============================================================================
 # BOTTOM TABS
 # =============================================================================
 
 st.markdown("---")
-tab1, tab2, tab3 = st.tabs(["📊 Data Info", "🧬 Physics Features", "📋 History"])
+tab1, tab2, tab3 = st.tabs(["📊 Data Info", "📋 History", "ℹ️ About"])
 
 with tab1:
     if st.session_state.current_image is not None:
@@ -1125,24 +1056,41 @@ with tab1:
         st.write(f"**Data type:** {st.session_state.current_image.dtype}")
         if st.session_state.frequencies is not None:
             st.write(f"**Frequency range:** {st.session_state.frequencies[0]:.2f} - {st.session_state.frequencies[-1]:.2f} GHz")
-            st.write(f"**Number of frequency points:** {len(st.session_state.frequencies)}")
+            st.write(f"**Frequency points:** {len(st.session_state.frequencies)}")
         if st.session_state.raw_data is not None:
             st.write(f"**Raw data paths:** {list(st.session_state.raw_data.keys())}")
+        st.write(f"**Foreground clicks:** {len(st.session_state.foreground_clicks)}")
+        st.write(f"**Background clicks:** {len(st.session_state.background_clicks)}")
     else:
         st.info("No data loaded yet.")
 
 with tab2:
-    st.info("Physical features will be extracted from raw data when available.")
-    if st.session_state.raw_data is not None and st.session_state.foreground_clicks:
-        st.write("Click positions recorded for physical feature extraction.")
-
-with tab3:
     st.write(f"**Masks generated:** {len(st.session_state.masks_history)}")
     if st.session_state.masks_history:
         for i, mask in enumerate(st.session_state.masks_history[-5:]):
-            st.caption(f"Mask {i+1}: {np.sum(mask)} pixels")
+            area = np.sum(mask)
+            st.caption(f"Mask {i+1}: {area} pixels")
     else:
         st.info("No masks generated yet.")
+
+with tab3:
+    st.markdown("""
+    ### 🔬 Hypoxify Annotation Suite
+    
+    **Version:** 0.2.0
+    
+    **Features:**
+    - Physics-informed segmentation for microwave/thermoacoustic imaging
+    - Click-based annotation with SAM
+    - Raw data reconstruction (S21 parameters)
+    - Multiple export formats (COCO, YOLO, MONAI, PNG)
+    
+    **Author:** Anie Udofia
+    
+    **License:** MIT
+    
+    **Built with:** Streamlit, SAM, NumPy, SciPy
+    """)
 
 # =============================================================================
 # FOOTER
@@ -1150,7 +1098,7 @@ with tab3:
 
 st.markdown("---")
 st.caption(
-    "🔬 Hypoxify Annotation Suite v0.1.0 | "
-    "Physics-informed segmentation for biomedical imaging | "
+    "🔬 Hypoxify Annotation Suite v0.2.0 | "
+    "Physics-informed segmentation | "
     "Data stored locally; no data uploaded to servers."
 )
