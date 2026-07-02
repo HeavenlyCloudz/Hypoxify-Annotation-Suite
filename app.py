@@ -1,11 +1,11 @@
 """
-Hypoxify Annotation Suite - With Click Visualization
-Shows clicks as dots on the image using matplotlib.
+Hypoxify Annotation Suite - Standalone App
+With coordinate overlay and manual click input.
 """
 
 import streamlit as st
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import pandas as pd
 from pathlib import Path
 import tempfile
@@ -15,9 +15,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
-import matplotlib
-matplotlib.use('Agg')
+import matplotlib.patches as patches
 
 # =============================================================================
 # PAGE CONFIGURATION
@@ -58,19 +56,16 @@ st.markdown("""
         font-weight: bold;
         color: #0d47a1;
     }
-    .coord-input {
-        background-color: #f5f5f5;
-        padding: 15px;
-        border-radius: 8px;
-        margin: 8px 0;
-    }
     .stButton button {
         font-weight: 600;
         border-radius: 8px;
     }
-    .click-label {
-        font-family: monospace;
-        font-size: 12px;
+    .coord-grid {
+        background-color: #f5f5f5;
+        padding: 15px;
+        border-radius: 8px;
+        margin: 8px 0;
+        border: 1px solid #ddd;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -152,6 +147,127 @@ def linear_to_db(linear):
     """Convert linear magnitude to dB"""
     linear = np.maximum(linear, 1e-12)
     return 10 * np.log10(linear)
+
+def draw_coordinate_overlay(
+    image: np.ndarray,
+    clicks_foreground: List[Tuple[int, int]],
+    clicks_background: List[Tuple[int, int]],
+    grid_spacing: int = 50
+) -> np.ndarray:
+    """
+    Draw coordinate overlay on image with grid lines and click markers.
+    
+    Args:
+        image: Input image (H, W, 3) uint8
+        clicks_foreground: List of (x, y) foreground points
+        clicks_background: List of (x, y) background points
+        grid_spacing: Spacing between grid lines in pixels
+    
+    Returns:
+        Image with overlay drawn
+    """
+    # Convert to PIL for drawing
+    if image.dtype != np.uint8:
+        image = (image / image.max() * 255).astype(np.uint8)
+    
+    if image.ndim == 2:
+        image = np.stack([image] * 3, axis=-1)
+    
+    pil_img = Image.fromarray(image)
+    draw = ImageDraw.Draw(pil_img)
+    
+    h, w = image.shape[:2]
+    
+    # Draw grid lines (light gray)
+    for x in range(0, w, grid_spacing):
+        draw.line([(x, 0), (x, h)], fill=(200, 200, 200, 128), width=1)
+    for y in range(0, h, grid_spacing):
+        draw.line([(0, y), (w, y)], fill=(200, 200, 200, 128), width=1)
+    
+    # Draw coordinate labels at edges
+    try:
+        font = ImageFont.load_default()
+    except:
+        font = None
+    
+    # Draw foreground clicks (blue circles)
+    for x, y in clicks_foreground:
+        # Outer glow
+        for r in range(8, 12, 2):
+            draw.ellipse([x-r, y-r, x+r, y+r], outline=(0, 100, 255, 100), width=2)
+        # Main circle
+        draw.ellipse([x-6, y-6, x+6, y+6], fill=(0, 150, 255), outline=(0, 50, 200), width=2)
+        # Center dot
+        draw.ellipse([x-2, y-2, x+2, y+2], fill=(255, 255, 255))
+        # Label
+        idx = clicks_foreground.index((x, y))
+        draw.text((x + 10, y - 5), f"F{idx+1}", fill=(0, 150, 255), font=font)
+    
+    # Draw background clicks (red circles)
+    for x, y in clicks_background:
+        for r in range(8, 12, 2):
+            draw.ellipse([x-r, y-r, x+r, y+r], outline=(255, 50, 50, 100), width=2)
+        draw.ellipse([x-6, y-6, x+6, y+6], fill=(255, 80, 80), outline=(200, 0, 0), width=2)
+        draw.ellipse([x-2, y-2, x+2, y+2], fill=(255, 255, 255))
+        idx = clicks_background.index((x, y))
+        draw.text((x + 10, y - 5), f"B{idx+1}", fill=(255, 80, 80), font=font)
+    
+    # Add border
+    draw.rectangle([0, 0, w-1, h-1], outline=(0, 0, 0), width=2)
+    
+    return np.array(pil_img)
+
+
+def plot_with_coordinates(
+    image: np.ndarray,
+    clicks_foreground: List[Tuple[int, int]],
+    clicks_background: List[Tuple[int, int]]
+) -> plt.Figure:
+    """
+    Create a matplotlib figure with the image and coordinate grid.
+    """
+    if image.dtype != np.uint8:
+        image = (image / image.max() * 255).astype(np.uint8)
+    
+    if image.ndim == 2:
+        image = np.stack([image] * 3, axis=-1)
+    
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(image, cmap='gray', interpolation='nearest')
+    
+    h, w = image.shape[:2]
+    
+    # Grid lines
+    grid_spacing = 50
+    for x in range(0, w, grid_spacing):
+        ax.axvline(x, color='gray', alpha=0.3, linewidth=0.5)
+    for y in range(0, h, grid_spacing):
+        ax.axhline(y, color='gray', alpha=0.3, linewidth=0.5)
+    
+    # Foreground clicks
+    for idx, (x, y) in enumerate(clicks_foreground):
+        circle = patches.Circle((x, y), 8, color='blue', alpha=0.7, edgecolor='darkblue', linewidth=2)
+        ax.add_patch(circle)
+        ax.text(x + 10, y - 5, f'F{idx+1}', color='blue', fontsize=10, fontweight='bold')
+    
+    # Background clicks
+    for idx, (x, y) in enumerate(clicks_background):
+        circle = patches.Circle((x, y), 8, color='red', alpha=0.7, edgecolor='darkred', linewidth=2)
+        ax.add_patch(circle)
+        ax.text(x + 10, y - 5, f'B{idx+1}', color='red', fontsize=10, fontweight='bold')
+    
+    ax.set_xlim(0, w)
+    ax.set_ylim(h, 0)
+    ax.set_xlabel('X (pixels)', fontsize=12)
+    ax.set_ylabel('Y (pixels)', fontsize=12)
+    ax.set_title('Image with Coordinate Overlay', fontsize=14)
+    ax.grid(True, alpha=0.2)
+    
+    return fig
+
+# =============================================================================
+# RECONSTRUCTION FUNCTIONS
+# =============================================================================
 
 def delay_and_sum_reconstruction(
     s21_data: Dict[int, np.ndarray],
@@ -348,48 +464,102 @@ def auto_load(filepath):
         raise ValueError(f"Unsupported file format: {suffix}")
 
 # =============================================================================
-# VISUALIZATION FUNCTIONS
+# EXPORT FUNCTIONS
 # =============================================================================
 
-def draw_image_with_clicks(image: np.ndarray, foreground: List[Tuple[int, int]], 
-                          background: List[Tuple[int, int]]) -> np.ndarray:
-    """
-    Draw the image with click overlays using matplotlib.
-    Returns a numpy array of the figure.
-    """
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+def get_bbox_from_mask(mask):
+    """Get bounding box from binary mask."""
+    mask = np.asarray(mask)
+    coords = np.argwhere(mask > 0)
+    if len(coords) == 0:
+        return (0, 0, 0, 0)
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+    return (int(x_min), int(y_min), int(x_max), int(y_max))
+
+def to_coco_format(masks, image_ids, category_ids=None, image_shapes=None):
+    """Convert masks to COCO JSON format."""
+    if category_ids is None:
+        category_ids = [1] * len(masks)
     
-    # Display the image
-    ax.imshow(image, cmap='gray' if image.ndim == 2 else None)
+    annotations = []
+    for idx, mask in enumerate(masks):
+        mask = np.asarray(mask)
+        h, w = mask.shape[:2] if image_shapes is None else image_shapes[idx]
+        
+        x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
+        bbox_width = x_max - x_min
+        bbox_height = y_max - y_min
+        
+        annotations.append({
+            "id": idx,
+            "image_id": image_ids[idx],
+            "category_id": category_ids[idx],
+            "bbox": [x_min, y_min, bbox_width, bbox_height],
+            "area": int(np.sum(mask)),
+            "iscrowd": 0,
+        })
     
-    # Draw foreground clicks (blue circles with numbers)
-    for i, (x, y) in enumerate(foreground):
-        circle = Circle((x, y), 5, color='blue', fill=True, alpha=0.8)
-        ax.add_patch(circle)
-        ax.text(x + 8, y + 8, str(i+1), color='blue', fontsize=10, 
-                fontweight='bold', bbox=dict(facecolor='white', alpha=0.7))
+    return {
+        "images": [
+            {"id": img_id, "width": w, "height": h}
+            for img_id, (h, w) in zip(image_ids, image_shapes or [])
+        ],
+        "annotations": annotations,
+        "categories": [{"id": 1, "name": "lesion"}, {"id": 2, "name": "tumor"}],
+    }
+
+def to_yolo_format(masks, image_shapes, class_ids=None):
+    """Convert masks to YOLO TXT format."""
+    if class_ids is None:
+        class_ids = [0] * len(masks)
     
-    # Draw background clicks (red circles with numbers)
-    for i, (x, y) in enumerate(background):
-        circle = Circle((x, y), 5, color='red', fill=True, alpha=0.8)
-        ax.add_patch(circle)
-        ax.text(x + 8, y + 8, str(i+1), color='red', fontsize=10, 
-                fontweight='bold', bbox=dict(facecolor='white', alpha=0.7))
+    yolo_lines = []
+    for mask, (h, w), class_id in zip(masks, image_shapes, class_ids):
+        mask = np.asarray(mask)
+        x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
+        
+        x_center = ((x_min + x_max) / 2) / w
+        y_center = ((y_min + y_max) / 2) / h
+        bbox_width = (x_max - x_min) / w
+        bbox_height = (y_max - y_min) / h
+        
+        yolo_lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {bbox_width:.6f} {bbox_height:.6f}")
     
-    ax.set_title(f"Image with Clicks (Blue: Foreground {len(foreground)}, Red: Background {len(background)})")
-    ax.axis('off')
-    plt.tight_layout()
+    return yolo_lines
+
+def to_monai_format(masks, image_ids, category_ids=None):
+    """Convert masks to MONAI format."""
+    if category_ids is None:
+        category_ids = [1] * len(masks)
     
-    # Convert to numpy array
-    fig.canvas.draw()
-    img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-    img_array = img_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-    plt.close(fig)
+    monai_output = []
+    for mask, img_id, cat_id in zip(masks, image_ids, category_ids):
+        mask = np.asarray(mask)
+        mask_flat = mask.flatten()
+        rle = []
+        prev = None
+        count = 0
+        for val in mask_flat:
+            if val == prev:
+                count += 1
+            else:
+                if prev is not None:
+                    rle.append(count)
+                prev = val
+                count = 1
+        rle.append(count)
+        
+        monai_output.append({
+            "image_id": img_id,
+            "label": cat_id,
+            "segmentation": {"counts": rle, "size": list(mask.shape)},
+        })
     
-    return img_array
+    return monai_output
 
 # =============================================================================
-# SAM WRAPPER (Mock mode for deployment)
+# SAM WRAPPER
 # =============================================================================
 
 SAM_AVAILABLE = False
@@ -508,101 +678,6 @@ class SAMWrapper:
         return mask
 
 # =============================================================================
-# EXPORT FUNCTIONS
-# =============================================================================
-
-def get_bbox_from_mask(mask):
-    """Get bounding box from binary mask."""
-    mask = np.asarray(mask)
-    coords = np.argwhere(mask > 0)
-    if len(coords) == 0:
-        return (0, 0, 0, 0)
-    y_min, x_min = coords.min(axis=0)
-    y_max, x_max = coords.max(axis=0)
-    return (int(x_min), int(y_min), int(x_max), int(y_max))
-
-def to_coco_format(masks, image_ids, category_ids=None, image_shapes=None):
-    """Convert masks to COCO JSON format."""
-    if category_ids is None:
-        category_ids = [1] * len(masks)
-    
-    annotations = []
-    for idx, mask in enumerate(masks):
-        mask = np.asarray(mask)
-        h, w = mask.shape[:2] if image_shapes is None else image_shapes[idx]
-        
-        x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
-        bbox_width = x_max - x_min
-        bbox_height = y_max - y_min
-        
-        annotations.append({
-            "id": idx,
-            "image_id": image_ids[idx],
-            "category_id": category_ids[idx],
-            "bbox": [x_min, y_min, bbox_width, bbox_height],
-            "area": int(np.sum(mask)),
-            "iscrowd": 0,
-        })
-    
-    return {
-        "images": [
-            {"id": img_id, "width": w, "height": h}
-            for img_id, (h, w) in zip(image_ids, image_shapes or [])
-        ],
-        "annotations": annotations,
-        "categories": [{"id": 1, "name": "lesion"}, {"id": 2, "name": "tumor"}],
-    }
-
-def to_yolo_format(masks, image_shapes, class_ids=None):
-    """Convert masks to YOLO TXT format."""
-    if class_ids is None:
-        class_ids = [0] * len(masks)
-    
-    yolo_lines = []
-    for mask, (h, w), class_id in zip(masks, image_shapes, class_ids):
-        mask = np.asarray(mask)
-        x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
-        
-        x_center = ((x_min + x_max) / 2) / w
-        y_center = ((y_min + y_max) / 2) / h
-        bbox_width = (x_max - x_min) / w
-        bbox_height = (y_max - y_min) / h
-        
-        yolo_lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {bbox_width:.6f} {bbox_height:.6f}")
-    
-    return yolo_lines
-
-def to_monai_format(masks, image_ids, category_ids=None):
-    """Convert masks to MONAI format."""
-    if category_ids is None:
-        category_ids = [1] * len(masks)
-    
-    monai_output = []
-    for mask, img_id, cat_id in zip(masks, image_ids, category_ids):
-        mask = np.asarray(mask)
-        mask_flat = mask.flatten()
-        rle = []
-        prev = None
-        count = 0
-        for val in mask_flat:
-            if val == prev:
-                count += 1
-            else:
-                if prev is not None:
-                    rle.append(count)
-                prev = val
-                count = 1
-        rle.append(count)
-        
-        monai_output.append({
-            "image_id": img_id,
-            "label": cat_id,
-            "segmentation": {"counts": rle, "size": list(mask.shape)},
-        })
-    
-    return monai_output
-
-# =============================================================================
 # SESSION STATE
 # =============================================================================
 
@@ -638,6 +713,10 @@ if "image_width" not in st.session_state:
     st.session_state.image_width = 512
 if "image_height" not in st.session_state:
     st.session_state.image_height = 512
+if "overlay_image" not in st.session_state:
+    st.session_state.overlay_image = None
+if "show_grid" not in st.session_state:
+    st.session_state.show_grid = True
 
 # =============================================================================
 # SIDEBAR
@@ -649,7 +728,7 @@ with st.sidebar:
     if logo_path.exists():
         try:
             logo = Image.open(logo_path)
-            st.image(logo, width='stretch')
+            st.image(logo, use_container_width=True)
         except:
             st.markdown("## 🔬 Hypoxify")
     else:
@@ -733,7 +812,7 @@ st.info(
 col1, col2 = st.columns([1, 1])
 
 # =============================================================================
-# LEFT COLUMN
+# LEFT COLUMN - IMAGE DISPLAY WITH OVERLAY
 # =============================================================================
 
 with col1:
@@ -759,6 +838,7 @@ with col1:
                 st.session_state.foreground_clicks = []
                 st.session_state.background_clicks = []
                 st.session_state.current_mask = None
+                st.session_state.overlay_image = None
                 st.success(f"✅ Loaded: {uploaded_file.name} ({image_array.shape})")
             except Exception as e:
                 st.error(f"Error loading image: {e}")
@@ -832,6 +912,7 @@ with col1:
                         st.session_state.current_mask = None
                         st.session_state.frequencies = frequencies
                         st.session_state.raw_data = s21_data_dict
+                        st.session_state.overlay_image = None
                         
                         st.success("✅ Reconstruction complete!")
                     except Exception as e:
@@ -840,62 +921,53 @@ with col1:
                         st.code(traceback.format_exc())
     
     # =========================================================================
-    # IMAGE DISPLAY WITH CLICK VISUALIZATION
+    # IMAGE DISPLAY WITH COORDINATE OVERLAY
     # =========================================================================
     
-    st.markdown("### 🖼️ Image with Click Visualization")
+    st.markdown("### 🖼️ Image with Coordinate Grid")
     
-    # Check if image is loaded
+    # Show grid toggle
+    show_grid = st.checkbox("Show coordinate grid", value=st.session_state.show_grid)
+    st.session_state.show_grid = show_grid
+    
     if st.session_state.current_image is not None:
         img = st.session_state.current_image
-        
-        # Normalize image for display
         if img.dtype != np.uint8:
-            img_display = (img / img.max() * 255).astype(np.uint8)
-        else:
-            img_display = img
+            img = (img / img.max() * 255).astype(np.uint8)
         
-        # Ensure 3-channel for display
-        if img_display.ndim == 2:
-            img_display = np.stack([img_display] * 3, axis=-1)
-        
-        # Draw image with click overlays
+        # Create overlay with clicks
         if st.session_state.foreground_clicks or st.session_state.background_clicks:
-            with st.spinner("Rendering clicks..."):
-                try:
-                    image_with_clicks = draw_image_with_clicks(
-                        img_display,
-                        st.session_state.foreground_clicks,
-                        st.session_state.background_clicks
-                    )
-                    st.image(image_with_clicks, use_container_width=True)
-                except Exception as e:
-                    st.warning(f"Could not render click overlay: {e}")
-                    st.image(img_display, use_container_width=True)
+            # Draw overlay using PIL
+            overlay_img = draw_coordinate_overlay(
+                img,
+                st.session_state.foreground_clicks,
+                st.session_state.background_clicks,
+                grid_spacing=50 if show_grid else 1000  # effectively no grid if disabled
+            )
+            st.image(overlay_img, use_container_width=True, caption="Click points shown as circles")
         else:
-            # Show plain image
-            st.image(img_display, use_container_width=True, caption="Add clicks below")
+            # Show plain image with grid
+            if show_grid:
+                overlay_img = draw_coordinate_overlay(img, [], [], grid_spacing=50)
+                st.image(overlay_img, use_container_width=True, caption="Coordinate grid")
+            else:
+                st.image(img, use_container_width=True, caption="Image (no overlay)")
         
-        # Click info
-        st.markdown(f"""
-        <div class="click-instruction">
-            🔵 <b>Click Mode:</b> {st.session_state.click_mode.upper()}
-            {' (Add foreground points)' if st.session_state.click_mode == 'foreground' else ' (Add background points)'}
-        </div>
-        """, unsafe_allow_html=True)
-        
+        # Show click counts
         st.markdown(f"""
         <div class="click-count">
-            Foreground clicks: {len(st.session_state.foreground_clicks)} | 
-            Background clicks: {len(st.session_state.background_clicks)}
+            🔵 Foreground clicks: {len(st.session_state.foreground_clicks)} | 
+            🔴 Background clicks: {len(st.session_state.background_clicks)}
         </div>
         """, unsafe_allow_html=True)
         
-        # Manual coordinate input - FIXED with safe defaults
-        st.markdown("### 📍 Add Click by Coordinates")
-        st.caption("Enter pixel coordinates (x, y) and click the button to add a point.")
+        # =========================================================================
+        # COORDINATE INPUT
+        # =========================================================================
         
-        # Get valid max values (ensure they're at least 1)
+        st.markdown("### 📍 Add Click by Coordinate")
+        
+        # Get safe max values
         max_x = max(1, st.session_state.image_width - 1)
         max_y = max(1, st.session_state.image_height - 1)
         default_x = min(st.session_state.image_width // 2, max_x)
@@ -921,7 +993,15 @@ with col1:
                 key="y_coord_input"
             )
         
-        col_add_fg, col_add_bg = st.columns(2)
+        # Current click mode display
+        st.markdown(f"""
+        <div class="click-instruction">
+            🔵 <b>Click Mode:</b> {st.session_state.click_mode.upper()}
+            {' (Add foreground points)' if st.session_state.click_mode == 'foreground' else ' (Add background points)'}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col_add_fg, col_add_bg, col_clear = st.columns(3)
         with col_add_fg:
             if st.button("➕ Add Foreground", use_container_width=True):
                 st.session_state.foreground_clicks.append((int(x_coord), int(y_coord)))
@@ -932,34 +1012,29 @@ with col1:
                 st.session_state.background_clicks.append((int(x_coord), int(y_coord)))
                 st.session_state.current_mask = None
                 st.rerun()
+        with col_clear:
+            if st.button("🗑️ Clear All", use_container_width=True):
+                st.session_state.foreground_clicks = []
+                st.session_state.background_clicks = []
+                st.session_state.current_mask = None
+                st.rerun()
         
-        # Show clicked points in a table format
+        # Show clicked points list
         if st.session_state.foreground_clicks:
-            st.caption("🔵 Foreground Points (x, y):")
-            fg_str = ", ".join([f"({x},{y})" for x, y in st.session_state.foreground_clicks])
-            st.code(fg_str, language="text")
-        
+            st.caption(f"🔵 Foreground points: {len(st.session_state.foreground_clicks)}")
+            # Show as a compact table
+            fg_str = ", ".join([f"({x}, {y})" for x, y in st.session_state.foreground_clicks[-10:]])
+            st.code(f"FG: {fg_str}" if len(st.session_state.foreground_clicks) <= 10 else f"FG (last 10): {fg_str}")
         if st.session_state.background_clicks:
-            st.caption("🔴 Background Points (x, y):")
-            bg_str = ", ".join([f"({x},{y})" for x, y in st.session_state.background_clicks])
-            st.code(bg_str, language="text")
+            st.caption(f"🔴 Background points: {len(st.session_state.background_clicks)}")
+            bg_str = ", ".join([f"({x}, {y})" for x, y in st.session_state.background_clicks[-10:]])
+            st.code(f"BG: {bg_str}" if len(st.session_state.background_clicks) <= 10 else f"BG (last 10): {bg_str}")
         
-        # Mask overlay toggle
-        if st.session_state.current_mask is not None:
-            if st.checkbox("Show mask overlay"):
-                mask = st.session_state.current_mask
-                overlay = img_display.copy()
-                # Create red overlay
-                overlay[mask > 0, 0] = np.clip(overlay[mask > 0, 0] * 0.3 + 200, 0, 255)
-                overlay[mask > 0, 1] = overlay[mask > 0, 1] * 0.3
-                overlay[mask > 0, 2] = overlay[mask > 0, 2] * 0.3
-                st.image(overlay, use_container_width=True, caption="Mask Overlay")
-    
     else:
         st.info("👆 Upload data to begin")
 
 # =============================================================================
-# RIGHT COLUMN
+# RIGHT COLUMN - SEGMENTATION
 # =============================================================================
 
 with col2:
@@ -997,7 +1072,6 @@ with col2:
     
     st.markdown("---")
     
-    # Generate mask
     if st.session_state.image_loaded:
         if len(st.session_state.foreground_clicks) > 0:
             if st.button("⚡ Generate Mask", type="primary", use_container_width=True):
@@ -1106,8 +1180,8 @@ with tab3:
     
     **Features:**
     - Physics-informed segmentation for microwave/thermoacoustic imaging
-    - Manual click input with coordinate selection
-    - **Click visualization with numbered dots**
+    - Coordinate grid overlay with click visualization
+    - Manual click input with X/Y coordinate selection
     - Raw data reconstruction (S21 parameters)
     - Multiple export formats (COCO, YOLO, MONAI, PNG)
     
