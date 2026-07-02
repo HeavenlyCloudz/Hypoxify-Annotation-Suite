@@ -1,6 +1,6 @@
 """
 Hypoxify Annotation Suite - Standalone App
-Uses manual click input (no external package needed)
+Fixes for number_input validation and image display.
 """
 
 import streamlit as st
@@ -586,9 +586,9 @@ if "export_ready" not in st.session_state:
 if "click_mode" not in st.session_state:
     st.session_state.click_mode = "foreground"
 if "image_width" not in st.session_state:
-    st.session_state.image_width = 0
+    st.session_state.image_width = 512
 if "image_height" not in st.session_state:
-    st.session_state.image_height = 0
+    st.session_state.image_height = 512
 
 # =============================================================================
 # SIDEBAR
@@ -600,7 +600,7 @@ with st.sidebar:
     if logo_path.exists():
         try:
             logo = Image.open(logo_path)
-            st.image(logo, use_container_width=True)
+            st.image(logo, width='stretch')
         except:
             st.markdown("## 🔬 Hypoxify")
     else:
@@ -796,6 +796,7 @@ with col1:
     
     st.markdown("### 🖼️ Image Display")
     
+    # FIX: Check if image is loaded using st.session_state
     if st.session_state.current_image is not None:
         img = st.session_state.current_image
         if img.dtype != np.uint8:
@@ -817,24 +818,42 @@ with col1:
         </div>
         """, unsafe_allow_html=True)
         
-        # Manual coordinate input
+        # Manual coordinate input - FIXED with safe defaults
         st.markdown("### 📍 Add Click")
+        
+        # Get valid max values (ensure they're at least 1)
+        max_x = max(1, st.session_state.image_width - 1)
+        max_y = max(1, st.session_state.image_height - 1)
+        default_x = min(st.session_state.image_width // 2, max_x)
+        default_y = min(st.session_state.image_height // 2, max_y)
         
         col_x, col_y = st.columns(2)
         with col_x:
-            x_coord = st.number_input("X (pixels)", min_value=0, max_value=st.session_state.image_width-1, value=st.session_state.image_width//2, step=1)
+            x_coord = st.number_input(
+                "X (pixels)", 
+                min_value=0, 
+                max_value=max_x, 
+                value=default_x, 
+                step=1
+            )
         with col_y:
-            y_coord = st.number_input("Y (pixels)", min_value=0, max_value=st.session_state.image_height-1, value=st.session_state.image_height//2, step=1)
+            y_coord = st.number_input(
+                "Y (pixels)", 
+                min_value=0, 
+                max_value=max_y, 
+                value=default_y, 
+                step=1
+            )
         
         col_add_fg, col_add_bg = st.columns(2)
         with col_add_fg:
             if st.button("➕ Add Foreground", use_container_width=True):
-                st.session_state.foreground_clicks.append((x_coord, y_coord))
+                st.session_state.foreground_clicks.append((int(x_coord), int(y_coord)))
                 st.session_state.current_mask = None
                 st.rerun()
         with col_add_bg:
             if st.button("➖ Add Background", use_container_width=True):
-                st.session_state.background_clicks.append((x_coord, y_coord))
+                st.session_state.background_clicks.append((int(x_coord), int(y_coord)))
                 st.session_state.current_mask = None
                 st.rerun()
         
