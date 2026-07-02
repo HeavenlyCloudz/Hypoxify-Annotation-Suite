@@ -292,7 +292,7 @@ See the `LICENSE` file for details.
 
 **Anie Udofia**
 
-📧 anie.udofia@hypoxify.ai
+📧 anieudofia8@gmail.com
 
 GitHub:
 
