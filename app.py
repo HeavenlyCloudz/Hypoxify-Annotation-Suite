@@ -1,6 +1,6 @@
 """
 Hypoxify Annotation Suite - Standalone App
-Fully working with click detection, SAM integration, and logo.
+Uses manual click input (no external package needed)
 """
 
 import streamlit as st
@@ -12,14 +12,11 @@ import tempfile
 import json
 import io
 import re
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 from scipy.ndimage import gaussian_filter
 
-# For click detection
-from streamlit_image_coordinates import streamlit_image_coordinates
-
 # =============================================================================
-# PAGE CONFIGURATION (MUST BE FIRST)
+# PAGE CONFIGURATION
 # =============================================================================
 
 st.set_page_config(
@@ -46,40 +43,6 @@ st.markdown("""
         color: #555;
         margin-bottom: 1.5rem;
     }
-    .logo-container {
-        display: flex;
-        align-items: center;
-        gap: 15px;
-    }
-    .logo-text {
-        font-size: 2.5rem;
-        font-weight: 700;
-        color: #0d47a1;
-        margin: 0;
-    }
-    .feature-card {
-        background-color: #f5f5f5;
-        border-radius: 10px;
-        padding: 15px;
-        margin: 5px 0;
-        border-left: 4px solid #0d47a1;
-    }
-    .stButton button {
-        font-weight: 600;
-        border-radius: 8px;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px 8px 0 0;
-        padding: 10px 20px;
-        font-weight: 600;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #0d47a1;
-        color: white;
-    }
     .click-instruction {
         background-color: #e3f2fd;
         padding: 10px;
@@ -90,6 +53,16 @@ st.markdown("""
     .click-count {
         font-weight: bold;
         color: #0d47a1;
+    }
+    .coord-input {
+        background-color: #f5f5f5;
+        padding: 15px;
+        border-radius: 8px;
+        margin: 8px 0;
+    }
+    .stButton button {
+        font-weight: 600;
+        border-radius: 8px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -183,10 +156,7 @@ def delay_and_sum_reconstruction(
     num_points: int = 201,
     sigma: float = 2.0
 ) -> np.ndarray:
-    """
-    Reconstruct image using delay-and-sum beamforming.
-    This is the EXACT algorithm from your Pi code.
-    """
+    """Reconstruct image using delay-and-sum beamforming from Pi code."""
     antenna_positions = {
         1: (-75, 0),
         2: (75, 0),
@@ -268,7 +238,6 @@ def load_s21_csv(filepath):
     path = Path(filepath)
     df = pd.read_csv(path)
     
-    # Find frequency column
     freq_col = None
     for col in df.columns:
         if 'freq' in col.lower() or 'ghz' in col.lower():
@@ -277,7 +246,6 @@ def load_s21_csv(filepath):
     if freq_col is None:
         raise ValueError(f"Frequency column not found. Available: {df.columns.tolist()}")
     
-    # Find S21 column
     s21_col = None
     for col in df.columns:
         if 's21' in col.lower() or 's_param' in col.lower():
@@ -385,28 +353,6 @@ def get_bbox_from_mask(mask):
     y_max, x_max = coords.max(axis=0)
     return (int(x_min), int(y_min), int(x_max), int(y_max))
 
-def mask_to_polygon(mask, tolerance=2.0):
-    """Convert binary mask to polygon."""
-    try:
-        import cv2
-    except ImportError:
-        return []
-    
-    mask = np.asarray(mask)
-    contours, _ = cv2.findContours(
-        mask.astype(np.uint8),
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-    if not contours:
-        return []
-    
-    polygon = cv2.approxPolyDP(contours[0], tolerance, True)
-    polygon_list = polygon.squeeze().tolist()
-    if isinstance(polygon_list, list) and isinstance(polygon_list[0], (int, float)):
-        polygon_list = [polygon_list]
-    return polygon_list
-
 def to_coco_format(masks, image_ids, category_ids=None, image_shapes=None):
     """Convert masks to COCO JSON format."""
     if category_ids is None:
@@ -420,13 +366,11 @@ def to_coco_format(masks, image_ids, category_ids=None, image_shapes=None):
         x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
         bbox_width = x_max - x_min
         bbox_height = y_max - y_min
-        polygon = mask_to_polygon(mask)
         
         annotations.append({
             "id": idx,
             "image_id": image_ids[idx],
             "category_id": category_ids[idx],
-            "segmentation": [polygon] if polygon else [],
             "bbox": [x_min, y_min, bbox_width, bbox_height],
             "area": int(np.sum(mask)),
             "iscrowd": 0,
@@ -491,7 +435,7 @@ def to_monai_format(masks, image_ids, category_ids=None):
     return monai_output
 
 # =============================================================================
-# SAM WRAPPER (With real SAM support)
+# SAM WRAPPER (Mock mode for deployment)
 # =============================================================================
 
 SAM_AVAILABLE = False
@@ -503,7 +447,7 @@ except ImportError:
     print("⚠️ SAM not installed. Using mock segmentation.")
 
 class SAMWrapper:
-    """Real or mock SAM wrapper based on availability."""
+    """SAM wrapper with mock fallback."""
     
     def __init__(self, model_type="vit_b", checkpoint_path=None, device="auto"):
         self._image = None
@@ -513,15 +457,13 @@ class SAMWrapper:
         if not SAM_AVAILABLE:
             self._use_mock = True
             self._loaded = True
-            print("Using mock SAM (real SAM not installed)")
+            print("Using mock SAM")
             return
         
-        # Try to find checkpoint
         if checkpoint_path is None:
             default_paths = [
                 Path("sam_vit_b.pth"),
                 Path.home() / ".cache" / "sam" / "sam_vit_b.pth",
-                Path.home() / "sam" / "sam_vit_b.pth",
             ]
             for p in default_paths:
                 if p.exists():
@@ -551,17 +493,14 @@ class SAMWrapper:
             self._loaded = True
     
     def set_image(self, image):
-        """Set image for segmentation."""
         image = np.asarray(image)
         if image.ndim == 2:
             image = np.stack([image] * 3, axis=-1)
         self._image = image
-        
         if not self._use_mock and hasattr(self, 'predictor'):
             self.predictor.set_image(image)
     
     def from_clicks(self, foreground, background=None, multimask=False):
-        """Generate mask from clicks."""
         if self._use_mock:
             return self._mock_from_clicks(foreground, background)
         
@@ -615,7 +554,7 @@ class SAMWrapper:
         return mask
 
 # =============================================================================
-# SESSION STATE INITIALIZATION
+# SESSION STATE
 # =============================================================================
 
 if "image_loaded" not in st.session_state:
@@ -646,13 +585,17 @@ if "export_ready" not in st.session_state:
     st.session_state.export_ready = False
 if "click_mode" not in st.session_state:
     st.session_state.click_mode = "foreground"
+if "image_width" not in st.session_state:
+    st.session_state.image_width = 0
+if "image_height" not in st.session_state:
+    st.session_state.image_height = 0
 
 # =============================================================================
-# SIDEBAR - CONFIGURATION AND CONTROLS
+# SIDEBAR
 # =============================================================================
 
 with st.sidebar:
-    # LOGO
+    # Logo
     logo_path = Path("Hypoxify Logo.png")
     if logo_path.exists():
         try:
@@ -692,12 +635,6 @@ with st.sidebar:
     st.markdown("### 🎯 Segmentation Settings")
     sam_model = st.selectbox("SAM Model", options=["vit_b", "vit_l", "vit_h"], index=0)
     
-    use_physics_guidance = st.checkbox(
-        "🧬 Physics-Guided Segmentation",
-        value=False,
-        help="Use physical features to guide SAM (requires raw data)"
-    )
-    
     st.markdown("---")
     
     st.markdown("### 📤 Export")
@@ -714,7 +651,6 @@ with st.sidebar:
         else:
             st.warning("Please generate a mask first.")
     
-    # SAM Status
     st.markdown("---")
     if SAM_AVAILABLE:
         st.success("✅ SAM installed")
@@ -722,7 +658,7 @@ with st.sidebar:
         st.info("ℹ️ SAM not installed (using mock)")
 
 # =============================================================================
-# MAIN HEADER WITH LOGO
+# MAIN HEADER
 # =============================================================================
 
 col_logo1, col_logo2 = st.columns([1, 5])
@@ -739,10 +675,6 @@ with col_logo2:
     st.markdown('<p class="main-header">Hypoxify Annotation Suite</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Physics-informed segmentation for microwave and thermoacoustic imaging</p>', unsafe_allow_html=True)
 
-# =============================================================================
-# MAIN CONTENT
-# =============================================================================
-
 config = SUPPORTED_CONFIGURATIONS[st.session_state.selected_config]
 st.info(
     f"**Active Configuration:** {config['modality'].title()} - {config['description']}\n\n"
@@ -752,7 +684,7 @@ st.info(
 col1, col2 = st.columns([1, 1])
 
 # =============================================================================
-# LEFT COLUMN - IMAGE UPLOAD & PREPROCESSING
+# LEFT COLUMN
 # =============================================================================
 
 with col1:
@@ -773,6 +705,8 @@ with col1:
                     image_array = np.stack([image_array] * 3, axis=-1)
                 st.session_state.current_image = image_array
                 st.session_state.image_loaded = True
+                st.session_state.image_width = image_array.shape[1]
+                st.session_state.image_height = image_array.shape[0]
                 st.session_state.foreground_clicks = []
                 st.session_state.background_clicks = []
                 st.session_state.current_mask = None
@@ -785,21 +719,18 @@ with col1:
             "Upload Raw Data Files",
             type=["csv", "s2p", "mat"],
             accept_multiple_files=True,
-            help="Upload S21 parameter files. For multi-angle data, upload all files."
         )
         
-        # Baseline upload
         baseline_file = st.file_uploader(
             "Upload Baseline (Air) Scan (Optional)",
             type=["csv", "s2p", "mat"],
-            help="Upload a baseline scan for background subtraction"
         )
         
         if uploaded_files:
             st.write(f"**Files uploaded:** {len(uploaded_files)}")
             
             if st.button("🔨 Reconstruct Image from Raw Data", type="primary"):
-                with st.spinner("Reconstructing image from raw data..."):
+                with st.spinner("Reconstructing..."):
                     try:
                         temp_dir = tempfile.mkdtemp()
                         file_paths = []
@@ -808,7 +739,6 @@ with col1:
                             temp_path.write_bytes(f.read())
                             file_paths.append(temp_path)
                         
-                        # Load baseline if provided
                         baseline_data = None
                         if baseline_file:
                             baseline_path = Path(temp_dir) / baseline_file.name
@@ -829,7 +759,6 @@ with col1:
                                     s21_data_dict[path_num] = s21
                             frequencies, _ = auto_load(file_paths[0])
                         
-                        # Get frequency range from data
                         start_freq = float(frequencies[0])
                         stop_freq = float(frequencies[-1])
                         num_points = len(frequencies)
@@ -847,6 +776,8 @@ with col1:
                         
                         st.session_state.current_image = image
                         st.session_state.image_loaded = True
+                        st.session_state.image_width = image.shape[1]
+                        st.session_state.image_height = image.shape[0]
                         st.session_state.foreground_clicks = []
                         st.session_state.background_clicks = []
                         st.session_state.current_mask = None
@@ -860,25 +791,25 @@ with col1:
                         st.code(traceback.format_exc())
     
     # =========================================================================
-    # IMAGE DISPLAY WITH CLICK DETECTION
+    # IMAGE DISPLAY
     # =========================================================================
     
-    st.markdown("### 🖼️ Image with Click Detection")
+    st.markdown("### 🖼️ Image Display")
     
     if st.session_state.current_image is not None:
         img = st.session_state.current_image
         if img.dtype != np.uint8:
             img = (img / img.max() * 255).astype(np.uint8)
         
-        # Display click mode
+        st.image(img, use_container_width=True, caption="Click on the image to add points (use the input below)")
+        
         st.markdown(f"""
         <div class="click-instruction">
             🔵 <b>Click Mode:</b> {st.session_state.click_mode.upper()}
-            {' (Click on image to add)' if st.session_state.click_mode == 'foreground' else ' (Click to remove area)'}
+            {' (Add foreground points)' if st.session_state.click_mode == 'foreground' else ' (Add background points)'}
         </div>
         """, unsafe_allow_html=True)
         
-        # Click count display
         st.markdown(f"""
         <div class="click-count">
             Foreground clicks: {len(st.session_state.foreground_clicks)} | 
@@ -886,29 +817,36 @@ with col1:
         </div>
         """, unsafe_allow_html=True)
         
-        # Display the image with click detection
-        result = streamlit_image_coordinates(
-            img,
-            key="image_click",
-            click_event=True,
-            use_container_width=True
-        )
+        # Manual coordinate input
+        st.markdown("### 📍 Add Click")
         
-        # Handle click
-        if result is not None and result.get('type') == 'click':
-            x = int(result['x'])
-            y = int(result['y'])
-            
-            if st.session_state.click_mode == "foreground":
-                st.session_state.foreground_clicks.append((x, y))
-            else:
-                st.session_state.background_clicks.append((x, y))
-            
-            # Clear mask when new clicks are added
-            st.session_state.current_mask = None
-            st.rerun()
+        col_x, col_y = st.columns(2)
+        with col_x:
+            x_coord = st.number_input("X (pixels)", min_value=0, max_value=st.session_state.image_width-1, value=st.session_state.image_width//2, step=1)
+        with col_y:
+            y_coord = st.number_input("Y (pixels)", min_value=0, max_value=st.session_state.image_height-1, value=st.session_state.image_height//2, step=1)
         
-        # Show mask overlay if exists
+        col_add_fg, col_add_bg = st.columns(2)
+        with col_add_fg:
+            if st.button("➕ Add Foreground", use_container_width=True):
+                st.session_state.foreground_clicks.append((x_coord, y_coord))
+                st.session_state.current_mask = None
+                st.rerun()
+        with col_add_bg:
+            if st.button("➖ Add Background", use_container_width=True):
+                st.session_state.background_clicks.append((x_coord, y_coord))
+                st.session_state.current_mask = None
+                st.rerun()
+        
+        # Show clicked points
+        if st.session_state.foreground_clicks:
+            st.caption(f"🔵 Foreground: {len(st.session_state.foreground_clicks)} points")
+            st.code(str(st.session_state.foreground_clicks[-5:]) if len(st.session_state.foreground_clicks) > 5 else str(st.session_state.foreground_clicks))
+        if st.session_state.background_clicks:
+            st.caption(f"🔴 Background: {len(st.session_state.background_clicks)} points")
+            st.code(str(st.session_state.background_clicks[-5:]) if len(st.session_state.background_clicks) > 5 else str(st.session_state.background_clicks))
+        
+        # Mask overlay
         if st.session_state.current_mask is not None:
             if st.checkbox("Show mask overlay"):
                 mask = st.session_state.current_mask
@@ -917,47 +855,40 @@ with col1:
                     overlay = np.stack([overlay] * 3, axis=-1)
                 overlay[mask > 0, 0] = overlay[mask > 0, 0] * 0.5 + 200 * 0.5
                 st.image(overlay, use_container_width=True)
-        
-        # Show clicked points
-        if st.session_state.foreground_clicks:
-            st.caption(f"🔵 Foreground: {len(st.session_state.foreground_clicks)} points")
-        if st.session_state.background_clicks:
-            st.caption(f"🔴 Background: {len(st.session_state.background_clicks)} points")
     
     else:
         st.info("👆 Upload data to begin")
 
 # =============================================================================
-# RIGHT COLUMN - SEGMENTATION & EXPORT
+# RIGHT COLUMN
 # =============================================================================
 
 with col2:
     st.markdown("## 🎯 Segmentation")
     
-    # Click mode toggle
     col_mode1, col_mode2, col_reset, col_undo = st.columns([1, 1, 1, 1])
     
     with col_mode1:
-        if st.button("🔵 Foreground", use_container_width=True, 
+        if st.button("🔵 FG", use_container_width=True, 
                      type="primary" if st.session_state.click_mode == "foreground" else "secondary"):
             st.session_state.click_mode = "foreground"
             st.rerun()
     
     with col_mode2:
-        if st.button("🔴 Background", use_container_width=True,
+        if st.button("🔴 BG", use_container_width=True,
                      type="primary" if st.session_state.click_mode == "background" else "secondary"):
             st.session_state.click_mode = "background"
             st.rerun()
     
     with col_reset:
-        if st.button("🔄 Reset All", use_container_width=True):
+        if st.button("🔄 Reset", use_container_width=True):
             st.session_state.foreground_clicks = []
             st.session_state.background_clicks = []
             st.session_state.current_mask = None
             st.rerun()
     
     with col_undo:
-        if st.button("↩️ Undo Last", use_container_width=True):
+        if st.button("↩️ Undo", use_container_width=True):
             if st.session_state.background_clicks:
                 st.session_state.background_clicks.pop()
             elif st.session_state.foreground_clicks:
@@ -967,13 +898,11 @@ with col2:
     
     st.markdown("---")
     
-    # Generate mask
     if st.session_state.image_loaded:
         if len(st.session_state.foreground_clicks) > 0:
             if st.button("⚡ Generate Mask", type="primary", use_container_width=True):
                 with st.spinner("Segmenting..."):
                     try:
-                        # Initialize SAM
                         if st.session_state.segmenter is None:
                             checkpoint_path = None
                             for p in [Path("sam_vit_b.pth"), Path.home() / ".cache" / "sam" / "sam_vit_b.pth"]:
@@ -1002,10 +931,6 @@ with col2:
             st.info("👉 Add at least one foreground click to generate a mask.")
     else:
         st.info("📤 Load an image first.")
-    
-    # =========================================================================
-    # MASK DISPLAY
-    # =========================================================================
     
     st.markdown("### 🧬 Mask Result")
     
@@ -1044,7 +969,7 @@ with col2:
         st.info("🔄 No mask generated yet.")
 
 # =============================================================================
-# BOTTOM TABS
+# FOOTER TABS
 # =============================================================================
 
 st.markdown("---")
@@ -1081,15 +1006,13 @@ with tab3:
     
     **Features:**
     - Physics-informed segmentation for microwave/thermoacoustic imaging
-    - Click-based annotation with SAM
+    - Manual click input with coordinate selection
     - Raw data reconstruction (S21 parameters)
     - Multiple export formats (COCO, YOLO, MONAI, PNG)
     
     **Author:** Anie Udofia
     
     **License:** MIT
-    
-    **Built with:** Streamlit, SAM, NumPy, SciPy
     """)
 
 # =============================================================================
