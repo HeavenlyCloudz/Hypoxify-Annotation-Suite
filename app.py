@@ -290,80 +290,136 @@ def load_multi_angle_scans(directory, angles=None):
     return all_data
 
 # =============================================================================
-# RECONSTRUCTION FUNCTIONS
+# RECONSTRUCTION FUNCTIONS (UPDATED WITH YOUR PI CODE)
 # =============================================================================
 
+def db_to_linear(db):
+    """Convert dB to linear magnitude (power ratio)"""
+    return 10 ** (db / 10)
+
+def linear_to_db(linear):
+    """Convert linear magnitude to dB"""
+    linear = np.maximum(linear, 1e-12)
+    return 10 * np.log10(linear)
+
 def delay_and_sum_reconstruction(
-    s21_data,
-    frequencies,
-    baseline_data=None,
-    antenna_positions=None,
-    path_to_antenna_pair=None,
-    grid_size=DEFAULT_GRID_SIZE,
-    grid_extent=100.0,
-    sigma=GAUSSIAN_SIGMA
-):
-    """Reconstruct image using delay-and-sum beamforming."""
-    if antenna_positions is None:
-        antenna_positions = MICROWAVE_CONFIG["antenna_positions"]
-    if path_to_antenna_pair is None:
-        path_to_antenna_pair = MICROWAVE_CONFIG["path_to_antenna_pair"]
+    s21_data: Dict[int, np.ndarray],
+    frequencies: np.ndarray,
+    baseline_data: Optional[Dict[int, np.ndarray]] = None,
+    grid_size: int = 80,
+    grid_extent: float = 100.0,
+    start_freq: float = 2.0,
+    stop_freq: float = 3.0,
+    num_points: int = 201,
+    sigma: float = 2.0
+) -> np.ndarray:
+    """
+    Reconstruct image using delay-and-sum beamforming.
     
+    This is the EXACT algorithm from your Pi code.
+    """
+    # Antenna positions from your Pi code
+    antenna_positions = {
+        1: (-75, 0),
+        2: (75, 0),
+        3: (0, -75),
+        4: (0, 75),
+    }
+    
+    path_to_antenna_pair = {
+        1: (1, 3),
+        2: (1, 4),
+        3: (2, 3),
+        4: (2, 4),
+    }
+    
+    # Grid for reconstruction
     x_grid = np.linspace(-grid_extent, grid_extent, grid_size)
     y_grid = np.linspace(-grid_extent, grid_extent, grid_size)
     X, Y = np.meshgrid(x_grid, y_grid)
     
     image = np.zeros((grid_size, grid_size))
-    num_paths = 0
+    c = 3e8  # Speed of light in m/s
+    
+    # Frequency range parameters
+    START_FREQ_HZ = start_freq * 1e9
+    STOP_FREQ_HZ = stop_freq * 1e9
+    
+    num_paths_used = 0
     
     for path_num, s21_db in s21_data.items():
         if path_num not in path_to_antenna_pair:
             continue
         
+        # Get antenna positions
         tx_ant, rx_ant = path_to_antenna_pair[path_num]
         tx_pos = antenna_positions[tx_ant]
         rx_pos = antenna_positions[rx_ant]
         
+        # Convert to linear domain
         s21_linear = db_to_linear(s21_db)
         
+        # Apply background subtraction if available (linear domain)
         if baseline_data and path_num in baseline_data:
-            corrected_db = apply_background_subtraction(s21_db, baseline_data[path_num])
-            s21_linear = db_to_linear(corrected_db)
+            baseline_linear = db_to_linear(baseline_data[path_num])
+            s21_linear = s21_linear - baseline_linear
+            s21_linear = np.maximum(s21_linear, 1e-12)
         
-        s21_linear = np.maximum(s21_linear, 1e-12)
-        
+        # Delay-and-sum for each point in grid
         for i in range(grid_size):
             for j in range(grid_size):
                 point = (X[i, j], Y[i, j])
+                
+                # Calculate distances (in mm)
                 d_tx = np.sqrt((tx_pos[0] - point[0])**2 + (tx_pos[1] - point[1])**2)
                 d_rx = np.sqrt((rx_pos[0] - point[0])**2 + (rx_pos[1] - point[1])**2)
-                total_distance = (d_tx + d_rx) / 1000
+                total_dist = (d_tx + d_rx) / 1000  # Convert mm to meters
                 
-                delay_ps = total_distance / C_MM_PER_PS
-                freq_range_ghz = frequencies[-1] - frequencies[0]
-                freq_idx = int(delay_ps * freq_range_ghz / 1000)
-                freq_idx = np.clip(freq_idx, 0, len(s21_linear) - 1)
+                # Calculate delay in seconds
+                delay = total_dist / c
                 
+                # Frequency index mapping from your Pi code
+                freq_idx = int(np.clip(delay * 1e9 / (STOP_FREQ_HZ / 1e9) * num_points, 0, num_points - 1))
+                
+                # Clamp to valid range
+                freq_idx = min(freq_idx, len(s21_linear) - 1)
+                freq_idx = max(freq_idx, 0)
+                
+                # Add contribution
                 image[i, j] += s21_linear[freq_idx]
         
-        num_paths += 1
+        num_paths_used += 1
     
-    if num_paths > 0:
-        image /= num_paths
+    # Average across paths
+    if num_paths_used > 0:
+        image /= num_paths_used
     else:
         raise ValueError("No valid paths found in s21_data")
     
+    # Apply Gaussian smoothing
+    from scipy.ndimage import gaussian_filter
     image = gaussian_filter(image, sigma=sigma)
     
+    # Normalize to 0-255
     if image.max() > 0:
+        # Clip to 95th percentile to handle outliers
         image = np.clip(image, 0, np.percentile(image, 95))
         image = (image / image.max()) * 255
     
     return image.astype(np.uint8)
 
-def reconstruct_from_multi_angle(angle_data, frequencies, baseline_data=None, grid_size=DEFAULT_GRID_SIZE):
-    """Reconstruct image by averaging across multiple rotation angles."""
+
+def reconstruct_from_multi_angle(
+    angle_data: Dict[int, Dict[int, np.ndarray]],
+    frequencies: np.ndarray,
+    baseline_data: Optional[Dict[int, np.ndarray]] = None,
+    grid_size: int = 80
+) -> np.ndarray:
+    """
+    Reconstruct image by averaging across multiple rotation angles.
+    """
     images = []
+    
     for angle, s21_data in angle_data.items():
         image = delay_and_sum_reconstruction(
             s21_data=s21_data,
@@ -376,6 +432,7 @@ def reconstruct_from_multi_angle(angle_data, frequencies, baseline_data=None, gr
     if not images:
         raise ValueError("No images were reconstructed from angle_data")
     
+    # Average across angles
     avg_image = np.mean(images, axis=0)
     return avg_image.astype(np.uint8)
 
