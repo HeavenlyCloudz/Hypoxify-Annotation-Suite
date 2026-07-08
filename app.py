@@ -656,6 +656,9 @@ footer { display: none !important; }
 # BUILD UI
 # ------------------------------------------------------------
 with gr.Blocks() as demo:
+    # --- Google Verification Meta Tag (hidden) ---
+    gr.HTML('''<meta name="google-site-verification" content="-lWMCBxWu79FSSMnf6RW2SuDoawnHEZWxEJHq8KIc9c" />''', visible=False)
+    
     # --- Simple Header (no logo) ---
     gr.Markdown("# 🔬 Hypoxify Annotation Suite")
     gr.Markdown("### Physics‑informed segmentation for microwave and thermoacoustic imaging")
