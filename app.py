@@ -21,10 +21,10 @@ from typing import List, Dict, Optional, Tuple, Any
 class ProjectManager:
     """Handles playlist, current index, annotations per image, and save/load."""
     def __init__(self):
-        self.playlist: List[str] = []                     # list of image file paths
+        self.playlist: List[str] = []
         self.current_index: int = 0
-        self.annotations: Dict[str, Dict] = {}           # {image_path: {"masks": [], "points": [], "prompts": []}}
-        self.active_project_path: Optional[str] = None   # path to saved JSON
+        self.annotations: Dict[str, Dict] = {}
+        self.active_project_path: Optional[str] = None
 
     def add_images(self, image_paths: List[str]):
         for p in image_paths:
@@ -733,7 +733,7 @@ with gr.Blocks() as demo:
                     input_image.select(
                         on_image_click,
                         [input_image],
-                        [click_display, click_state, project_status]  # reuse project_status for feedback
+                        [click_display, click_state, project_status]
                     )
                 with gr.Column(scale=1):
                     gr.Markdown("### Seed Points")
@@ -741,8 +741,26 @@ with gr.Blocks() as demo:
                     run_inference_btn = gr.Button("Run Physics-Guided Segmentation", variant="primary")
                     inference_status = gr.Textbox(label="Status")
 
-        # ==================== TAB 2: RESULTS ====================
-        with gr.TabItem("Results", id=2):
+        # ==================== TAB 2: EDITOR (MOVED BEFORE RESULTS) ====================
+        with gr.TabItem("Editor", id=2):
+            with gr.Row():
+                with gr.Column(scale=2):
+                    editor_image = gr.Image(label="Selected Mask Overlay", type="numpy", interactive=False)
+                    uncertainty_btn = gr.Button("Show Uncertainty Heatmap", variant="secondary")
+                    uncertainty_output = gr.Image(label="Uncertainty Heatmap (Red=Uncertain, Green=Confident)", type="numpy")
+                with gr.Column(scale=1):
+                    gr.Markdown("### Refine Mask")
+                    refine_status = gr.Textbox(label="Status")
+                    gr.Markdown("💡 **Tip:** The uncertainty heatmap shows where the model is guessing (red). You can add more seed points in the **Input** tab to refine.")
+
+            uncertainty_btn.click(
+                show_uncertainty,
+                None,
+                [uncertainty_output]
+            )
+
+        # ==================== TAB 3: RESULTS ====================
+        with gr.TabItem("Results", id=3):
             with gr.Row():
                 with gr.Column(scale=2):
                     results_preview = gr.Image(label="Dielectric Map Preview", type="numpy")
@@ -781,24 +799,6 @@ with gr.Blocks() as demo:
                 init_editor,
                 None,
                 [editor_image, refine_status]
-            )
-
-        # ==================== TAB 3: EDITOR ====================
-        with gr.TabItem("Editor", id=3):
-            with gr.Row():
-                with gr.Column(scale=2):
-                    editor_image = gr.Image(label="Selected Mask Overlay", type="numpy", interactive=False)
-                    uncertainty_btn = gr.Button("Show Uncertainty Heatmap", variant="secondary")
-                    uncertainty_output = gr.Image(label="Uncertainty Heatmap (Red=Uncertain, Green=Confident)", type="numpy")
-                with gr.Column(scale=1):
-                    gr.Markdown("### Refine Mask")
-                    refine_status = gr.Textbox(label="Status")
-                    gr.Markdown("💡 **Tip:** The uncertainty heatmap shows where the model is guessing (red). You can add more seed points in the **Input** tab to refine.")
-
-            uncertainty_btn.click(
-                show_uncertainty,
-                None,
-                [uncertainty_output]
             )
 
         # ==================== TAB 4: EXPORT ====================
@@ -861,19 +861,19 @@ with gr.Blocks() as demo:
 
             ---
 
-            ### 3️⃣ Results Tab – Select Best Candidate
-            - The model generates 3 candidate masks (simulating SAM's multimask output).
-            - Check the box next to the candidate(s) you want to keep.
-            - Click **"Add Selected to Project"** to save them.
-
-            ---
-
-            ### 4️⃣ Editor Tab – Review & Uncertainty
+            ### 3️⃣ Editor Tab – Review & Uncertainty
             - View the selected mask overlaid on the image.
             - Click **"Show Uncertainty Heatmap"** to see:
                 - 🟢 **Green** = Model is confident.
                 - 🔴 **Red** = Model is guessing.
             - If the mask needs improvement, go back to the **Input** tab and add more seed points.
+
+            ---
+
+            ### 4️⃣ Results Tab – Select Best Candidate
+            - The model generates 3 candidate masks (simulating SAM's multimask output).
+            - Check the box next to the candidate(s) you want to keep.
+            - Click **"Add Selected to Project"** to save them.
 
             ---
 
