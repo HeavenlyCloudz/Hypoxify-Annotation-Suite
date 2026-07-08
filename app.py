@@ -905,5 +905,6 @@ if __name__ == "__main__":
         debug=False,
         pwa=True,
         theme=gr.themes.Soft(primary_hue="emerald", secondary_hue="blue"),
-        css=css
+        css=css,
+        head='<meta name="google-site-verification" content="-lWMCBxWu79FSSMnf6RW2SuDoawnHEZWxEJHq8KIc9c" />'
     )
