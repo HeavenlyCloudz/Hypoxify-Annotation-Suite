@@ -1,13 +1,6 @@
-# 🔬 Hypoxify Annotation Suite
+# Hypoxify Annotation Suite
 
-> **Physics-informed segmentation for microwave and thermoacoustic imaging**
-
-![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![License](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.25+-red.svg)
-![Status](https://img.shields.io/badge/Status-Alpha-orange.svg)
-
----
+A physics‑informed segmentation platform for microwave and thermoacoustic imaging, featuring a professional project workflow, candidate selection, and uncertainty quantification.
 
 # 📖 The Problem We Solve
 
@@ -37,112 +30,6 @@ Manual annotation typically requires **30–48 minutes per case** because:
 | 🎨 **No-Code Interface** | Streamlit dashboard for annotation without programming |
 | 🔬 **Python API** | Integrate directly into research pipelines |
 
----
-
-# 🚀 Quick Start
-
-## Option 1 — Run the Streamlit App
-
-```bash
-# Clone repository
-git clone https://github.com/HeavenlyCloudz/Hypoxify-Annotation-Suite.git
-
-cd Hypoxify-Annotation-Suite
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Launch Streamlit
-streamlit run app.py
-```
-
-The application will open at:
-
-```
-http://localhost:8501
-```
-
----
-
-## Option 2 — Use as a Python Package
-
-```python
-from hypoxify_annotate import (
-    auto_load,
-    delay_and_sum_reconstruction,
-    SAMWrapper,
-    to_coco_format
-)
-
-# Load raw data
-frequencies, s21_data = auto_load("patient_scan.csv")
-
-# Reconstruct image
-s21_dict = {1: s21_data}
-image = delay_and_sum_reconstruction(s21_dict, frequencies)
-
-# Segment
-segmenter = SAMWrapper()
-segmenter.set_image(image)
-
-mask = segmenter.from_clicks(
-    foreground=[(100, 150)]
-)
-
-# Export
-coco = to_coco_format(
-    [mask],
-    image_ids=[1],
-    image_shapes=[image.shape]
-)
-```
-
----
-
-# 📦 Installation
-
-## Prerequisites
-
-- Python 3.8+
-- pip
-
----
-
-## Install from Source
-
-```bash
-git clone https://github.com/HeavenlyCloudz/Hypoxify-Annotation-Suite.git
-
-cd Hypoxify-Annotation-Suite
-
-pip install -e .
-```
-
----
-
-## PyPI (Coming Soon)
-
-```bash
-pip install hypoxify-annotate
-```
-
----
-
-# 📚 Dependencies
-
-| Package | Purpose |
-|---------|----------|
-| numpy | Numerical computing |
-| scipy | Scientific computing |
-| pandas | Data handling |
-| pillow | Image I/O |
-| streamlit | Web application |
-| segment-anything | Meta Segment Anything (optional) |
-| opencv-python | Polygon conversion |
-| h5py | HDF5 support |
-| pydicom | DICOM support |
-
----
 
 # 🧠 Novel Contributions
 
@@ -168,52 +55,6 @@ Frequency-domain S-parameters are transformed into impulse responses, providing 
 
 Future releases aim to leverage **SAM 2** memory mechanisms to propagate annotations across volumetric image stacks.
 
----
-
-# 🗂️ Project Structure
-
-```text
-Hypoxify-Annotation-Suite/
-│
-├── app.py
-├── hypoxify_annotate/
-│   ├── io/
-│   ├── preprocess/
-│   ├── reconstruct/
-│   ├── segment/
-│   ├── features/
-│   ├── export/
-│   └── utils/
-│
-├── requirements.txt
-├── setup.py
-└── README.md
-```
-
----
-
-# 🖥️ Streamlit Application
-
-## Configuration
-
-Choose:
-
-- Imaging system
-- Reconstruction mode
-- Physics-guided segmentation
-- Export format
-
-Supported systems include:
-
-- 4-Antenna Microwave
-- 8-Antenna Microwave
-- Thermoacoustic Ring
-- Thermoacoustic Linear
-- MRI
-- CT
-- Histology
-
----
 
 ## Annotation Workflow
 
@@ -222,20 +63,6 @@ Supported systems include:
 3. (Optional) Add background clicks.
 4. Generate segmentation.
 5. Export annotations.
-
----
-
-# 📚 Package Modules
-
-| Module | Description |
-|---------|-------------|
-| **io** | CSV, S2P, MAT, DICOM, HDF5 loaders |
-| **preprocess** | Background subtraction, filtering, denoising, TGC |
-| **reconstruct** | Delay-and-sum beamforming |
-| **segment** | SAM wrapper with physics-guided prompting |
-| **features** | Time- and frequency-domain feature extraction |
-| **export** | COCO, YOLO, MONAI, PNG |
-| **utils** | Validation and antenna configurations |
 
 ---
 
