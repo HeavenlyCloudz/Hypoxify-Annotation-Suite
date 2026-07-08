@@ -2,7 +2,7 @@
 
 A physics‑informed segmentation platform for microwave and thermoacoustic imaging, featuring a professional project workflow, candidate selection, and uncertainty quantification.
 
-# 📖 The Problem We Solve
+# The Problem We Solve
 
 Biomedical researchers studying emerging imaging modalities—including **Microwave-Induced Thermoacoustic Tomography (MITT)**, **microwave imaging**, and **thermoacoustic imaging**—face a major annotation bottleneck.
 
@@ -17,7 +17,7 @@ Manual annotation typically requires **30–48 minutes per case** because:
 
 ---
 
-# ✨ Key Features
+# Key Features
 
 | Feature | Description |
 |---------|-------------|
@@ -31,7 +31,7 @@ Manual annotation typically requires **30–48 minutes per case** because:
 | 🔬 **Python API** | Integrate directly into research pipelines |
 
 
-# 🧠 Novel Contributions
+# Novel Contributions
 
 ## 1. Physics-Guided Prompting
 
@@ -66,7 +66,7 @@ Future releases aim to leverage **SAM 2** memory mechanisms to propagate annotat
 
 ---
 
-# 🤝 Contributing
+# Contributing
 
 Contributions are welcome.
 
@@ -98,7 +98,7 @@ pytest tests/
 
 ---
 
-# 📄 License
+# License
 
 This project is distributed under the **MIT License**.
 
@@ -106,7 +106,7 @@ See the `LICENSE` file for details.
 
 ---
 
-# 🙏 Acknowledgments
+# Acknowledgments
 
 - **Dr. Elise Fear** — Microwave imaging mentorship
 - **Calgary Youth Science Fair (CYSF/CWSF pathway)** — Early project support
@@ -115,7 +115,7 @@ See the `LICENSE` file for details.
 
 ---
 
-# 📬 Contact
+# Contact
 
 **Anie Udofia**
 
