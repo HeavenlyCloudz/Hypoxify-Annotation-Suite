@@ -89,7 +89,7 @@ class ProjectManager:
         return None
 
 # ------------------------------------------------------------
-# 2. RECONSTRUCTION (from your original code, unchanged)
+# 2. RECONSTRUCTION FUNCTIONS (CSV, S2P, MAT supported)
 # ------------------------------------------------------------
 def db_to_linear(db):
     return 10 ** (np.asarray(db) / 10)
@@ -223,7 +223,7 @@ def auto_load(filepath):
         raise ValueError(f"Unsupported file format: {suffix}")
 
 # ------------------------------------------------------------
-# 3. PHYSICS SIMULATION AND SEGMENTATION (simplified mock)
+# 3. PHYSICS SIMULATION AND SEGMENTATION
 # ------------------------------------------------------------
 class PhysicsSimulator:
     @staticmethod
@@ -449,84 +449,192 @@ def reconstruct_from_files(files, baseline_files, grid_size, grid_extent, sigma)
         import traceback
         return None, f"Error: {e}\n{traceback.format_exc()}"
 
-def set_click_point(evt: gr.SelectData, image):
+def on_image_click(evt: gr.SelectData, image):
     if image is None:
-        return image, None
+        return image, None, None
     x, y = evt.index
     img_copy = np.uint8(image * 255) if image.max() <= 1.0 else np.uint8(image)
     img_copy = cv2.cvtColor(img_copy, cv2.COLOR_RGB2BGR)
     cv2.circle(img_copy, (x, y), 8, (0, 0, 255), 2)
     img_copy = cv2.cvtColor(img_copy, cv2.COLOR_BGR2RGB)
-    return img_copy, (int(x), int(y))
+    return img_copy, (int(x), int(y)), f"Point set at ({x}, {y})"
 
-def run_physics_segmentation(image, click_coords):
+def run_physics_segmentation(image, point):
     if image is None:
-        return [], None, "Please upload or reconstruct an image."
-    if click_coords is None:
-        return [], None, "Please click on the image to set a seed point."
+        return [], None, "Please load an image.", gr.update()
+    if point is None:
+        return [], None, "Please set a seed point.", gr.update()
     # generate multiple candidates (simulate multimask)
     candidates = []
+    physics_maps = None
     for i in range(3):
-        physics_maps = PhysicsSimulator.extract_physical_signature(image, click_coords)
-        mask = MockSAMDecoder.generate_mask(image, click_coords, physics_maps)
+        physics_maps = PhysicsSimulator.extract_physical_signature(image, point)
+        mask = MockSAMDecoder.generate_mask(image, point, physics_maps)
         score = 0.9 - i * 0.08 + np.random.normal(0, 0.02)
         candidates.append((mask, float(np.clip(score, 0.5, 0.99)), f"Candidate {i+1}"))
-    # also show dielectric map
-    phys_img = np.stack([physics_maps["dielectric"]]*3, axis=2)
-    phys_img = np.uint8(phys_img * 255)
-    return candidates, phys_img, "Generated 3 candidates."
+    # show dielectric map
+    if physics_maps is not None:
+        phys_img = np.stack([physics_maps["dielectric"]]*3, axis=2)
+        phys_img = np.uint8(phys_img * 255)
+    else:
+        phys_img = None
+    return candidates, phys_img, "Generated 3 candidates.", gr.update(selected=2)
 
-def render_candidates(candidates):
-    if not candidates:
-        return [], None
-    choices = [f"{c[2]} (score {c[1]:.2f})" for c in candidates]
-    # preview: overlay all masks on image (transparent)
-    # We need the original image from somewhere – we'll pass it separately.
-    # For simplicity, just return choices and a placeholder.
-    return choices, None
-
-def add_selected_to_project(candidates, selected_choices, current_img_path):
-    if not selected_choices or not candidates:
+def add_selected_to_project(candidates, selected_labels):
+    if not candidates or not selected_labels:
         return "No candidates selected.", gr.update()
-    # map selected labels to masks
+    # find masks
     selected_masks = []
-    for choice in selected_choices:
+    for label in selected_labels:
         for c in candidates:
-            if choice.startswith(c[2]):
+            if label.startswith(c[2]):
                 selected_masks.append(c[0])
-    # save to project
-    if current_img_path:
-        for mask in selected_masks:
-            project.save_annotation(current_img_path, mask, [])
-        return f"Added {len(selected_masks)} masks to project.", gr.update(selected=3)  # switch to Editor
-    return "No image loaded.", gr.update()
+                break
+    if not selected_masks:
+        return "No matching candidates.", gr.update()
+    # get current image path from project
+    img_path = project.get_current_path()
+    if img_path is None:
+        return "No image loaded in project.", gr.update()
+    # save each mask
+    for mask in selected_masks:
+        project.save_annotation(img_path, mask, [])
+    return f"Added {len(selected_masks)} masks to project.", gr.update(selected=3)
 
-def init_editor(image_path):
-    if not image_path or image_path not in project.annotations:
+def init_editor():
+    img_path = project.get_current_path()
+    if img_path is None or img_path not in project.annotations:
         return None, "No annotations for this image."
-    masks = project.annotations[image_path]["masks"]
+    masks = project.annotations[img_path]["masks"]
     if not masks:
         return None, "No masks saved."
     # show the last mask with overlay
     last_mask = np.array(masks[-1]).astype(np.uint8) * 255
     # overlay on current image
-    img = cv2.imread(image_path)
+    img = cv2.imread(img_path)
+    if img is None:
+        return None, "Could not load image."
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     overlay = img.copy()
     overlay[last_mask > 0] = overlay[last_mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
     return np.uint8(overlay), f"Showing mask {len(masks)}"
 
-def calculate_uncertainty(image, mask):
-    if image is None or mask is None:
+def show_uncertainty():
+    img_path = project.get_current_path()
+    if img_path is None or img_path not in project.annotations:
         return None
-    # mask might be stored as list; convert
-    if isinstance(mask, list):
-        mask = np.array(mask)
-    heatmap, _ = UncertaintyCalculator.compute_heatmaps(image, mask)
+    masks = project.annotations[img_path]["masks"]
+    if not masks:
+        return None
+    mask = np.array(masks[-1])
+    img = cv2.imread(img_path)
+    if img is None:
+        return None
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    heatmap, _ = UncertaintyCalculator.compute_heatmaps(img / 255.0, mask)
     return heatmap
 
+def export_annotations(fmt):
+    # gather all masks from project
+    all_masks = []
+    for path, ann in project.annotations.items():
+        for mask_list in ann["masks"]:
+            mask = np.array(mask_list)
+            all_masks.append(mask)
+    if not all_masks:
+        return None, "No annotations to export."
+    if fmt == "COCO":
+        coco = to_coco_format(all_masks, image_ids=list(range(len(all_masks))), image_shapes=[mask.shape for mask in all_masks])
+        json_str = json.dumps(coco, indent=2)
+        return json_str, "COCO JSON ready"
+    elif fmt == "PNG":
+        import zipfile
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w') as zf:
+            for i, mask in enumerate(all_masks):
+                mask_img = Image.fromarray((mask * 255).astype(np.uint8))
+                buf = io.BytesIO()
+                mask_img.save(buf, format="PNG")
+                zf.writestr(f"mask_{i}.png", buf.getvalue())
+        zip_buffer.seek(0)
+        return zip_buffer.getvalue(), "PNG zip ready"
+    elif fmt == "YOLO":
+        lines = []
+        for mask in all_masks:
+            h, w = mask.shape
+            x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
+            x_center = ((x_min + x_max) / 2) / w
+            y_center = ((y_min + y_max) / 2) / h
+            bbox_width = (x_max - x_min) / w
+            bbox_height = (y_max - y_min) / h
+            lines.append(f"0 {x_center:.6f} {y_center:.6f} {bbox_width:.6f} {bbox_height:.6f}")
+        txt = "\n".join(lines)
+        return txt, "YOLO text ready"
+    else:
+        return None, "Unsupported format"
+
+def add_images_to_project(files):
+    if not files:
+        return "No files selected.", "", None
+    paths = [f.name for f in files]
+    project.add_images(paths)
+    if not project.playlist:
+        return "No valid images.", "", None
+    img = project.load_image(0)
+    status = f"Added {len(paths)} images. Total: {len(project.playlist)}"
+    playlist_str = "\n".join([str(i+1)+": "+os.path.basename(p) for i,p in enumerate(project.playlist)])
+    return status, playlist_str, img
+
+def save_project(name):
+    if not project.playlist:
+        return "No project to save."
+    os.makedirs("saved_projects", exist_ok=True)
+    path = f"saved_projects/{name}.json"
+    msg = project.save_project(path)
+    return msg
+
+def reconstruct_and_add(data_files, baseline_files, gs, ge, sig):
+    img, msg = reconstruct_from_files(data_files, baseline_files, gs, ge, sig)
+    if img is not None:
+        temp_path = tempfile.mktemp(suffix=".png")
+        cv2.imwrite(temp_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        project.add_images([temp_path])
+        proj_img = project.load_image(0)
+        playlist_str = "\n".join([os.path.basename(p) for p in project.playlist])
+        return msg, playlist_str, proj_img
+    return msg, "", None
+
+def process_volume(files):
+    if not files:
+        return None, None, None
+    images = []
+    for f in files:
+        img = cv2.imread(f.name)
+        if img is None:
+            continue
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        images.append(img)
+    if not images:
+        return None, None, None
+    first_img = images[0]
+    click = (first_img.shape[1]//2, first_img.shape[0]//2)
+    physics = PhysicsSimulator.extract_physical_signature(first_img, click)
+    first_mask = MockSAMDecoder.generate_mask(first_img, click, physics)
+    all_masks = VolumetricPropagator.propagate_3d(images, first_mask, physics)
+    return images, all_masks, first_mask
+
+def update_volume_viewer(slice_idx, images, masks):
+    if images is None or masks is None:
+        return None
+    idx = int(slice_idx)
+    img = images[idx]
+    mask = masks[idx]
+    overlay = img.copy()
+    overlay[mask > 0] = overlay[mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
+    return np.uint8(overlay)
+
 # ------------------------------------------------------------
-# CSS (darker font, PWA ready)
+# CSS (darker font, PWA ready, logo styling)
 # ------------------------------------------------------------
 css = """
 body, .gradio-container, .gr-box, .gr-textbox, label, .gr-markdown, .gr-form, .gr-row {
@@ -540,6 +648,11 @@ h1, h2, h3, h4, .gr-markdown h1, .gr-markdown h2, .gr-markdown h3 {
 label, .gr-label {
     font-weight: 500 !important;
 }
+#header-logo img {
+    object-fit: contain !important;
+    margin-top: 8px !important;
+    max-height: 70px !important;
+}
 #col-container { max-width: 1400px; margin: 0 auto; }
 footer { display: none !important; }
 """
@@ -548,13 +661,26 @@ footer { display: none !important; }
 # BUILD UI
 # ------------------------------------------------------------
 with gr.Blocks() as demo:
-    gr.Markdown("# 🔬 Hypoxify Annotation Suite")
-    gr.Markdown("### Physics‑informed segmentation for microwave and thermoacoustic imaging")
+    # --- Header with Logo ---
+    with gr.Row(elem_id="header-row"):
+        with gr.Column(scale=1, min_width=80):
+            gr.Image(
+                value="logo image.png",
+                height=70,
+                show_label=False,
+                interactive=False,
+                container=False,
+                elem_id="header-logo"
+            )
+        with gr.Column(scale=5):
+            gr.Markdown("# 🔬 Hypoxify Annotation Suite")
+            gr.Markdown("### Physics‑informed segmentation for microwave and thermoacoustic imaging")
 
     # State variables
     st_current_image_path = gr.State(value=None)
-    st_candidates = gr.State(value=[])        # list of (mask, score, name)
-    st_selected_choices = gr.State(value=[])  # list of selected label strings
+    st_candidates = gr.State(value=[])
+    st_selected_choices = gr.State(value=[])
+    click_state = gr.State(value=None)
 
     with gr.Tabs() as tabs:
         # ==================== TAB 0: SETUP ====================
@@ -567,12 +693,12 @@ with gr.Blocks() as demo:
                     with gr.Row():
                         project_name = gr.Textbox(label="Project Name", value="my_project", scale=3)
                         save_project_btn = gr.Button("Save Project", variant="secondary", scale=1)
-                        load_project_btn = gr.Button("Load Project", variant="secondary", scale=1)
                     project_status = gr.Textbox(label="Status", lines=3, interactive=False)
                     # Raw data reconstruction
                     gr.Markdown("### Raw Data Reconstruction")
-                    data_files = gr.File(label="Upload S21 data (CSV, S2P, MAT)", file_count="multiple")
-                    baseline_files = gr.File(label="Baseline (air) files", file_count="multiple")
+                    gr.Markdown("**Supported file types:** CSV, S2P, MAT")
+                    data_files = gr.File(label="Upload S21 data files", file_count="multiple")
+                    baseline_files = gr.File(label="Baseline (air) files (optional)", file_count="multiple")
                     grid_size = gr.Slider(30, 150, value=80, label="Grid size")
                     grid_extent = gr.Slider(50, 200, value=100.0, label="Grid extent (mm)")
                     sigma = gr.Slider(0.5, 5.0, value=2.0, label="Smoothing")
@@ -582,57 +708,16 @@ with gr.Blocks() as demo:
                     playlist_display = gr.Textbox(label="Images in Project", lines=10, interactive=False)
                     current_img_display = gr.Image(label="Current Image Preview", type="numpy")
 
-            def add_images_to_project(files):
-                if not files:
-                    return "No files selected.", "", None
-                paths = [f.name for f in files]
-                project.add_images(paths)
-                if not project.playlist:
-                    return "No valid images.", "", None
-                # load first image
-                img = project.load_image(0)
-                status = f"Added {len(paths)} images. Total: {len(project.playlist)}"
-                playlist_str = "\n".join([str(i+1)+": "+os.path.basename(p) for i,p in enumerate(project.playlist)])
-                return status, playlist_str, img
-
             load_imgs_btn.click(
                 add_images_to_project,
                 [img_upload],
                 [project_status, playlist_display, current_img_display]
             )
-
-            def save_project(name):
-                if not project.playlist:
-                    return "No project to save."
-                os.makedirs("saved_projects", exist_ok=True)
-                path = f"saved_projects/{name}.json"
-                msg = project.save_project(path)
-                return msg
-
             save_project_btn.click(
                 save_project,
                 [project_name],
                 [project_status]
             )
-
-            def load_project_from_file():
-                # In a real app, we'd use a file picker; we'll use a dropdown
-                # For simplicity, we'll just load a default or use a textbox.
-                # We'll use a dropdown in the UI.
-                return "Use the dropdown below."
-
-            def reconstruct_and_add(data_files, baseline_files, gs, ge, sig):
-                img, msg = reconstruct_from_files(data_files, baseline_files, gs, ge, sig)
-                if img is not None:
-                    # save to temp and add to project
-                    temp_path = tempfile.mktemp(suffix=".png")
-                    cv2.imwrite(temp_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-                    project.add_images([temp_path])
-                    proj_img = project.load_image(0)
-                    playlist_str = "\n".join([os.path.basename(p) for p in project.playlist])
-                    return msg, playlist_str, proj_img
-                return msg, "", None
-
             recon_btn.click(
                 reconstruct_and_add,
                 [data_files, baseline_files, grid_size, grid_extent, sigma],
@@ -645,14 +730,14 @@ with gr.Blocks() as demo:
                 with gr.Column(scale=2):
                     input_image = gr.Image(label="Current Image (click to set seed)", type="numpy", interactive=True, elem_id="input_image")
                     click_display = gr.Image(label="Click point preview", type="numpy", interactive=False)
-                    input_image.select(set_click_point, [input_image], [click_display, st_current_image_path])  # st_current_image_path holds (x,y) tuple? Actually we need to store the point separately.
-                    # Better: store point in a separate state
-                    click_state = gr.State(value=None)
-                    # We'll modify set_click_point to set the state
+                    input_image.select(
+                        on_image_click,
+                        [input_image],
+                        [click_display, click_state, project_status]  # reuse project_status for feedback
+                    )
                 with gr.Column(scale=1):
                     gr.Markdown("### Seed Points")
-                    fg_points = gr.Textbox(label="Foreground points (x,y)", lines=2, interactive=False)
-                    bg_points = gr.Textbox(label="Background points", lines=2, interactive=False)
+                    gr.Markdown("Click on the image to place a **foreground** seed point.")
                     run_inference_btn = gr.Button("Run Physics-Guided Segmentation", variant="primary")
                     inference_status = gr.Textbox(label="Status")
 
@@ -660,7 +745,7 @@ with gr.Blocks() as demo:
         with gr.TabItem("Results", id=2):
             with gr.Row():
                 with gr.Column(scale=2):
-                    results_preview = gr.Image(label="Candidate Overlay", type="numpy")
+                    results_preview = gr.Image(label="Dielectric Map Preview", type="numpy")
                 with gr.Column(scale=1):
                     candidates_list = gr.CheckboxGroup(label="Select Candidates", choices=[])
                     select_all_btn = gr.Button("Select All", size="sm")
@@ -668,17 +753,53 @@ with gr.Blocks() as demo:
                     add_selected_btn = gr.Button("Add Selected to Project", variant="primary")
                     results_status = gr.Textbox(label="Status")
 
+            run_inference_btn.click(
+                run_physics_segmentation,
+                [input_image, click_state],
+                [st_candidates, results_preview, inference_status, tabs]
+            ).then(
+                lambda candidates: ([f"{c[2]} (score {c[1]:.2f})" for c in candidates], candidates),
+                [st_candidates],
+                [candidates_list, st_candidates]
+            )
+
+            select_all_btn.click(
+                lambda choices: choices,
+                [candidates_list],
+                [candidates_list]
+            )
+            deselect_all_btn.click(
+                lambda: [],
+                None,
+                [candidates_list]
+            )
+            add_selected_btn.click(
+                add_selected_to_project,
+                [st_candidates, candidates_list],
+                [results_status, tabs]
+            ).then(
+                init_editor,
+                None,
+                [editor_image, refine_status]
+            )
+
         # ==================== TAB 3: EDITOR ====================
         with gr.TabItem("Editor", id=3):
             with gr.Row():
                 with gr.Column(scale=2):
                     editor_image = gr.Image(label="Selected Mask Overlay", type="numpy", interactive=False)
                     uncertainty_btn = gr.Button("Show Uncertainty Heatmap", variant="secondary")
-                    uncertainty_output = gr.Image(label="Uncertainty Heatmap", type="numpy")
+                    uncertainty_output = gr.Image(label="Uncertainty Heatmap (Red=Uncertain, Green=Confident)", type="numpy")
                 with gr.Column(scale=1):
                     gr.Markdown("### Refine Mask")
-                    # We'll add simple include/exclude clicks later
                     refine_status = gr.Textbox(label="Status")
+                    gr.Markdown("💡 **Tip:** The uncertainty heatmap shows where the model is guessing (red). You can add more seed points in the **Input** tab to refine.")
+
+            uncertainty_btn.click(
+                show_uncertainty,
+                None,
+                [uncertainty_output]
+            )
 
         # ==================== TAB 4: EXPORT ====================
         with gr.TabItem("Export", id=4):
@@ -689,7 +810,13 @@ with gr.Blocks() as demo:
                     export_output = gr.File(label="Download")
                     export_status = gr.Textbox(label="Status")
 
-        # ==================== EXTRA: 3D PROPAGATION ====================
+            export_btn.click(
+                export_annotations,
+                [export_format],
+                [export_output, export_status]
+            )
+
+        # ==================== TAB 5: 3D PROPAGATION ====================
         with gr.TabItem("3D Propagation", id=5):
             with gr.Row():
                 with gr.Column():
@@ -700,35 +827,6 @@ with gr.Blocks() as demo:
                     volume_viewer = gr.Image(label="Current slice with propagated mask", type="numpy")
             volume_state = gr.State(value=None)
             masks_state = gr.State(value=None)
-
-            def process_volume(files):
-                if not files:
-                    return None, None, None
-                images = []
-                for f in files:
-                    img = cv2.imread(f.name)
-                    if img is None:
-                        continue
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    images.append(img)
-                if not images:
-                    return None, None, None
-                first_img = images[0]
-                click = (first_img.shape[1]//2, first_img.shape[0]//2)
-                physics = PhysicsSimulator.extract_physical_signature(first_img, click)
-                first_mask = MockSAMDecoder.generate_mask(first_img, click, physics)
-                all_masks = VolumetricPropagator.propagate_3d(images, first_mask, physics)
-                return images, all_masks, first_mask
-
-            def update_volume_viewer(slice_idx, images, masks):
-                if images is None or masks is None:
-                    return None
-                idx = int(slice_idx)
-                img = images[idx]
-                mask = masks[idx]
-                overlay = img.copy()
-                overlay[mask > 0] = overlay[mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
-                return np.uint8(overlay)
 
             prop_btn.click(
                 process_volume,
@@ -741,176 +839,85 @@ with gr.Blocks() as demo:
                 [volume_viewer]
             )
 
-    # ------------------------------------------------------------
-    # WIRING THE WORKFLOW
-    # ------------------------------------------------------------
+        # ==================== TAB 6: USER GUIDE ====================
+        with gr.TabItem("📖 User Guide", id=6):
+            gr.Markdown("""
+            ## How to Use the Hypoxify Annotation Suite
 
-    # 1. When user clicks on input_image, we store the point in click_state and show preview
-    def on_image_click(evt: gr.SelectData, image):
-        if image is None:
-            return image, None, None
-        x, y = evt.index
-        img_copy = np.uint8(image * 255) if image.max() <= 1.0 else np.uint8(image)
-        img_copy = cv2.cvtColor(img_copy, cv2.COLOR_RGB2BGR)
-        cv2.circle(img_copy, (x, y), 8, (0, 0, 255), 2)
-        img_copy = cv2.cvtColor(img_copy, cv2.COLOR_BGR2RGB)
-        return img_copy, (int(x), int(y)), f"Point set at ({x}, {y})"
+            ### 1️⃣ Setup Tab – Load Your Data
+            - **Upload Images**: Click "Upload images" to add PNG, JPG, or other image files. Then click "Add to Project".
+            - **Raw Data Reconstruction**: If you have microwave S21 data:
+                - Upload your `.csv`, `.s2p`, or `.mat` files.
+                - Optionally upload **baseline (air) files** for background subtraction.
+                - Adjust grid size and smoothing, then click "Reconstruct and Add to Project".
+            - **Save Project**: Give your project a name and click "Save Project". This saves all your annotations as a JSON file in the `saved_projects/` folder.
 
-    input_image.select(
-        on_image_click,
-        [input_image],
-        [click_display, click_state, inference_status]  # inference_status used as point status
-    )
+            ---
 
-    # 2. Run inference -> generate candidates and switch to Results tab
-    def run_inference(image, point):
-        if image is None:
-            return [], None, "Please load an image.", gr.update()
-        if point is None:
-            return [], None, "Please set a seed point.", gr.update()
-        candidates, phys_img, msg = run_physics_segmentation(image, point)
-        # store candidates in state
-        return candidates, phys_img, msg, gr.update(selected=2)  # switch to Results tab
+            ### 2️⃣ Input Tab – Place Seed Points
+            - Click anywhere on the image to place a **foreground** seed point (red dot).
+            - This tells the model where the object of interest is.
+            - Click **"Run Physics‑Guided Segmentation"** to generate candidate masks.
 
-    run_inference_btn.click(
-        run_inference,
-        [input_image, click_state],
-        [st_candidates, results_preview, inference_status, tabs]
-    ).then(
-        # update candidates list
-        lambda candidates: ([f"{c[2]} (score {c[1]:.2f})" for c in candidates], candidates),
-        [st_candidates],
-        [candidates_list, st_candidates]
-    )
+            ---
 
-    # 3. Select All / Deselect All
-    def select_all(choices):
-        return choices
+            ### 3️⃣ Results Tab – Select Best Candidate
+            - The model generates 3 candidate masks (simulating SAM's multimask output).
+            - Check the box next to the candidate(s) you want to keep.
+            - Click **"Add Selected to Project"** to save them.
 
-    select_all_btn.click(
-        lambda choices: choices,
-        [candidates_list],
-        [candidates_list]
-    )
+            ---
 
-    deselect_all_btn.click(
-        lambda: [],
-        None,
-        [candidates_list]
-    )
+            ### 4️⃣ Editor Tab – Review & Uncertainty
+            - View the selected mask overlaid on the image.
+            - Click **"Show Uncertainty Heatmap"** to see:
+                - 🟢 **Green** = Model is confident.
+                - 🔴 **Red** = Model is guessing.
+            - If the mask needs improvement, go back to the **Input** tab and add more seed points.
 
-    # 4. Add selected to project
-    def add_selected(candidates, selected_labels):
-        if not candidates or not selected_labels:
-            return "No candidates selected.", gr.update()
-        # find masks
-        selected_masks = []
-        for label in selected_labels:
-            for c in candidates:
-                if label.startswith(c[2]):
-                    selected_masks.append(c[0])
-                    break
-        if not selected_masks:
-            return "No matching candidates.", gr.update()
-        # get current image path from project
-        img_path = project.get_current_path()
-        if img_path is None:
-            return "No image loaded in project.", gr.update()
-        # save each mask
-        for mask in selected_masks:
-            project.save_annotation(img_path, mask, [])
-        return f"Added {len(selected_masks)} masks to project.", gr.update(selected=3)
+            ---
 
-    add_selected_btn.click(
-        add_selected,
-        [st_candidates, candidates_list],
-        [results_status, tabs]
-    ).then(
-        # Switch to Editor and load annotation
-        lambda: init_editor(project.get_current_path()),
-        None,
-        [editor_image, refine_status]
-    )
+            ### 5️⃣ Export Tab – Download Annotations
+            - Choose your format: **COCO** (JSON), **YOLO** (TXT), or **PNG** (zip of masks).
+            - Click "Export Annotations" to download.
 
-    # 5. Editor: show uncertainty
-    def show_uncertainty():
-        # get current image and last mask
-        img_path = project.get_current_path()
-        if img_path is None or img_path not in project.annotations:
-            return None
-        masks = project.annotations[img_path]["masks"]
-        if not masks:
-            return None
-        mask = np.array(masks[-1])
-        img = cv2.imread(img_path)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        heatmap, _ = UncertaintyCalculator.compute_heatmaps(img / 255.0, mask)
-        return heatmap
+            ---
 
-    uncertainty_btn.click(
-        show_uncertainty,
-        None,
-        [uncertainty_output]
-    )
+            ### 🧊 3D Propagation Tab – Volume Annotation
+            - Upload a stack of slices (multiple image files).
+            - Click "Propagate from first slice" – the app automatically annotates the first slice and propagates the mask through the entire volume using optical flow.
+            - Use the slider to browse slices.
 
-    # 6. Export
-    def export_annotations(fmt):
-        # gather all masks from project
-        all_masks = []
-        for path, ann in project.annotations.items():
-            for mask_list in ann["masks"]:
-                mask = np.array(mask_list)
-                all_masks.append(mask)
-        if not all_masks:
-            return None, "No annotations to export."
-        if fmt == "COCO":
-            coco = to_coco_format(all_masks, image_ids=list(range(len(all_masks))), image_shapes=[mask.shape for mask in all_masks])
-            json_str = json.dumps(coco, indent=2)
-            return json_str, "COCO JSON ready"
-        elif fmt == "PNG":
-            # export as a zip of PNGs
-            import zipfile
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w') as zf:
-                for i, mask in enumerate(all_masks):
-                    mask_img = Image.fromarray((mask * 255).astype(np.uint8))
-                    buf = io.BytesIO()
-                    mask_img.save(buf, format="PNG")
-                    zf.writestr(f"mask_{i}.png", buf.getvalue())
-            zip_buffer.seek(0)
-            return zip_buffer.getvalue(), "PNG zip ready"
-        elif fmt == "YOLO":
-            # simple YOLO lines
-            lines = []
-            for mask in all_masks:
-                h, w = mask.shape
-                x_min, y_min, x_max, y_max = get_bbox_from_mask(mask)
-                x_center = ((x_min + x_max) / 2) / w
-                y_center = ((y_min + y_max) / 2) / h
-                bbox_width = (x_max - x_min) / w
-                bbox_height = (y_max - y_min) / h
-                lines.append(f"0 {x_center:.6f} {y_center:.6f} {bbox_width:.6f} {bbox_height:.6f}")
-            txt = "\n".join(lines)
-            return txt, "YOLO text ready"
-        else:
-            return None, "Unsupported format"
+            ---
 
-    export_btn.click(
-        export_annotations,
-        [export_format],
-        [export_output, export_status]
-    )
+            ### 💾 Saving & Loading
+            - Your annotations are automatically stored in the project memory.
+            - To resume later, click **"Save Project"** in the Setup tab, then load the JSON file from the `saved_projects/` directory.
+
+            ---
+
+            ### 📁 Supported File Types
+            - **Images**: PNG, JPG, JPEG, TIFF, BMP
+            - **Raw Data**: CSV, S2P, MAT (for microwave S21 parameters)
+            - **Export**: COCO JSON, YOLO TXT, PNG mask zip
+
+            ### 🚀 Tips
+            - For best results, place the seed point near the center of the target.
+            - Use the uncertainty heatmap to identify weak areas and add more seed points there.
+            - The 3D propagation works best when slices are ordered sequentially.
+
+            **Enjoy annotating with Hypoxify!**
+            """)
 
 # ------------------------------------------------------------
-# LAUNCH
+# LAUNCH (Render‑ready)
 # ------------------------------------------------------------
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 7860))  # fallback to 7860 if not set
+    port = int(os.environ.get("PORT", 7860))
     demo.launch(
-        server_name="0.0.0.0",      # required for Render
-        server_port=port,           # use Render's assigned port
-        share=False,                # not needed; Render provides its own URL
+        server_name="0.0.0.0",
+        server_port=port,
+        share=False,
         debug=False,
         pwa=True,
         theme=gr.themes.Soft(primary_hue="emerald", secondary_hue="blue"),
