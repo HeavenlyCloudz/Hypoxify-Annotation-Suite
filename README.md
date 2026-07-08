@@ -258,7 +258,3 @@ If you find Hypoxify Annotation Suite useful, please consider:
 - 💡 Contributing improvements or feature suggestions
 
 Your support helps advance open-source biomedical imaging tools.
-
----
-
-**Built with ❤️ for the Conrad Challenge.**
