@@ -905,9 +905,13 @@ with gr.Blocks() as demo:
 # LAUNCH
 # ------------------------------------------------------------
 if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 7860))  # fallback to 7860 if not set
     demo.launch(
-        share=True,
-        debug=True,
+        server_name="0.0.0.0",      # required for Render
+        server_port=port,           # use Render's assigned port
+        share=False,                # not needed; Render provides its own URL
+        debug=False,
         pwa=True,
         theme=gr.themes.Soft(primary_hue="emerald", secondary_hue="blue"),
         css=css
