@@ -478,7 +478,7 @@ def run_physics_segmentation(image, point):
         phys_img = np.uint8(phys_img * 255)
     else:
         phys_img = None
-    return candidates, phys_img, "Generated 3 candidates.", gr.update(selected=2)
+    return candidates, phys_img, "Generated 3 candidates.", gr.update(selected=2)  # switch to Editor (id=2)
 
 def add_selected_to_project(candidates, selected_labels):
     if not candidates or not selected_labels:
@@ -499,7 +499,7 @@ def add_selected_to_project(candidates, selected_labels):
     # save each mask
     for mask in selected_masks:
         project.save_annotation(img_path, mask, [])
-    return f"Added {len(selected_masks)} masks to project.", gr.update(selected=3)
+    return f"Added {len(selected_masks)} masks to project.", gr.update(selected=3)  # switch to Results (id=3)
 
 def init_editor():
     img_path = project.get_current_path()
@@ -634,7 +634,7 @@ def update_volume_viewer(slice_idx, images, masks):
     return np.uint8(overlay)
 
 # ------------------------------------------------------------
-# CSS (darker font, PWA ready, logo styling)
+# CSS (darker font, PWA ready – no logo styling needed)
 # ------------------------------------------------------------
 css = """
 body, .gradio-container, .gr-box, .gr-textbox, label, .gr-markdown, .gr-form, .gr-row {
@@ -648,11 +648,6 @@ h1, h2, h3, h4, .gr-markdown h1, .gr-markdown h2, .gr-markdown h3 {
 label, .gr-label {
     font-weight: 500 !important;
 }
-#header-logo img {
-    object-fit: contain !important;
-    margin-top: 8px !important;
-    max-height: 70px !important;
-}
 #col-container { max-width: 1400px; margin: 0 auto; }
 footer { display: none !important; }
 """
@@ -661,20 +656,9 @@ footer { display: none !important; }
 # BUILD UI
 # ------------------------------------------------------------
 with gr.Blocks() as demo:
-    # --- Header with Logo ---
-    with gr.Row(elem_id="header-row"):
-        with gr.Column(scale=1, min_width=80):
-            gr.Image(
-                value="logo image.png",
-                height=70,
-                show_label=False,
-                interactive=False,
-                container=False,
-                elem_id="header-logo"
-            )
-        with gr.Column(scale=5):
-            gr.Markdown("# 🔬 Hypoxify Annotation Suite")
-            gr.Markdown("### Physics‑informed segmentation for microwave and thermoacoustic imaging")
+    # --- Simple Header (no logo) ---
+    gr.Markdown("# 🔬 Hypoxify Annotation Suite")
+    gr.Markdown("### Physics‑informed segmentation for microwave and thermoacoustic imaging")
 
     # State variables
     st_current_image_path = gr.State(value=None)
@@ -741,7 +725,7 @@ with gr.Blocks() as demo:
                     run_inference_btn = gr.Button("Run Physics-Guided Segmentation", variant="primary")
                     inference_status = gr.Textbox(label="Status")
 
-        # ==================== TAB 2: EDITOR (MOVED BEFORE RESULTS) ====================
+        # ==================== TAB 2: EDITOR ====================
         with gr.TabItem("Editor", id=2):
             with gr.Row():
                 with gr.Column(scale=2):
