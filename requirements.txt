@@ -5,3 +5,8 @@ scipy
 scikit-image
 Pillow
 pandas
+torch>=2.0.0
+torchvision>=0.15.0
+segment-anything
+pydicom
+scikit-rf
