@@ -111,25 +111,25 @@ One-click export that translates annotated masks into ready-to-train packages fo
 
 ### Local Installation
 
-git clone https://github.com/HeavenlyCloudz/Hypoxify-Annotation-Suite.git
-cd Hypoxify-Annotation-Suite
-pip install -r requirements.txt
-python app.py
+- git clone https://github.com/HeavenlyCloudz/Hypoxify-Annotation-Suite.git
+- cd Hypoxify-Annotation-Suite
+- pip install -r requirements.txt
+- python app.py
 
 
 ## Dependencies
 
-gradio>=4.0.0
-opencv-python-headless
-numpy
-scipy
-scikit-image
-Pillow
-pandas
-torch>=2.0.0
-torchvision>=0.15.0
-mobile-sam
-pydicom
+- gradio>=4.0.0
+- opencv-python-headless
+- numpy
+- scipy
+- scikit-image
+- Pillow
+- pandas
+- torch>=2.0.0
+- torchvision>=0.15.0
+- mobile-sam
+- pydicom
 
 ## Deploy to Render
 - Push to GitHub
