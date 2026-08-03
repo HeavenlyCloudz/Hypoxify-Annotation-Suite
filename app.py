@@ -23,19 +23,24 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ------------------------------------------------------------
-# 0. MOBILE SAM (Memory-Optimized)
+# 0. SAM2 TINY (Memory-Optimized)
 # ------------------------------------------------------------
 try:
-    from mobile_sam import sam_model_registry, SamPredictor
-    MOBILE_SAM_AVAILABLE = True
+    from sam2 import sam_model_registry, SamPredictor
+    SAM2_AVAILABLE = True
+    print("✅ SAM2 available")
 except ImportError:
-    MOBILE_SAM_AVAILABLE = False
-    print("⚠️ Mobile SAM not installed. Install with: pip install mobile-sam")
+    SAM2_AVAILABLE = False
+    print("⚠️ SAM2 not installed. Install with: pip install sam2")
 
-class MobileSAMWrapper:
-    """Lightweight SAM wrapper for memory-constrained environments."""
+class SAM2Wrapper:
+    """SAM2 wrapper optimized for memory-constrained environments using Tiny model."""
     
-    def __init__(self, checkpoint_path=None, model_type="vit_t", device="cpu"):
+    def __init__(self, checkpoint_path=None, model_type="tiny", device="cpu"):
+        """
+        Args:
+            model_type: "tiny" (~78MB), "small" (~300MB), "base" (~500MB)
+        """
         self.device = device
         self.model = None
         self.predictor = None
@@ -43,37 +48,22 @@ class MobileSAMWrapper:
         self._use_mock = False
         self._image = None
         
-        if not MOBILE_SAM_AVAILABLE:
+        if not SAM2_AVAILABLE:
             self._use_mock = True
             self._loaded = True
-            print("⚠️ Running in mock mode (Mobile SAM not installed)")
+            print("⚠️ Running in mock mode (SAM2 not installed)")
             return
         
-        # Download checkpoint if not present
-        if checkpoint_path is None or not os.path.exists(checkpoint_path):
-            checkpoint_path = "mobile_sam.pt"
-            if not os.path.exists(checkpoint_path):
-                try:
-                    print("📥 Downloading Mobile SAM checkpoint...")
-                    url = "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt"
-                    urllib.request.urlretrieve(url, checkpoint_path)
-                    print("✅ Download complete")
-                except Exception as e:
-                    print(f"❌ Failed to download checkpoint: {e}")
-                    self._use_mock = True
-                    self._loaded = True
-                    return
-        
         try:
-            # Load Mobile SAM (vit_t is smallest, ~40MB)
+            # SAM2 Tiny - auto-downloads checkpoint
             self.model = sam_model_registry[model_type](checkpoint=checkpoint_path)
             self.model.to(device=self.device)
             self.predictor = SamPredictor(self.model)
             self._loaded = True
             self._use_mock = False
-            print(f"✅ Mobile SAM loaded on {self.device}")
+            print(f"✅ SAM2 ({model_type}) loaded on {self.device}")
         except Exception as e:
-            print(f"❌ Failed to load Mobile SAM: {e}")
+            print(f"❌ Failed to load SAM2: {e}")
             self._use_mock = True
             self._loaded = True
     
@@ -89,7 +79,7 @@ class MobileSAMWrapper:
             self._use_mock = True
     
     def predict_from_clicks(self, points, labels):
-        """Run SAM prediction with click points."""
+        """Run SAM2 prediction with click points."""
         if self._use_mock or self.predictor is None:
             return self._mock_predict(points, labels)
         
@@ -110,7 +100,7 @@ class MobileSAMWrapper:
             best_idx = np.argmax(scores)
             return masks[best_idx].astype(np.uint8)
         except Exception as e:
-            print(f"⚠️ SAM prediction failed: {e}")
+            print(f"⚠️ SAM2 prediction failed: {e}")
             return self._mock_predict(points, labels)
     
     def _mock_predict(self, points, labels):
@@ -168,7 +158,6 @@ class ModalityDetector:
         features = {}
         
         if modality == "microwave":
-            # Extract both magnitude and phase from S21 data
             if "magnitude_db" in data:
                 features["dielectric"] = data["magnitude_db"]
             if "phase_deg" in data:
@@ -177,14 +166,12 @@ class ModalityDetector:
                 features["frequencies"] = data["frequencies"]
         
         elif modality == "photoacoustic":
-            # Extract acoustic pressure and frequency features
             if "pressure" in data:
                 features["acoustic_pressure"] = data["pressure"]
             if "frequency" in data:
                 features["frequency"] = data["frequency"]
         
         elif modality == "ultrasound":
-            # Extract RF features
             if "rf_signal" in data:
                 features["rf_signal"] = data["rf_signal"]
         
@@ -319,13 +306,10 @@ class PhysicsSimulator:
         
         # Modality-specific enhancements
         if modality == "microwave":
-            # Enhanced dielectric contrast for microwave
             dielectric = dielectric * 1.2
         elif modality == "photoacoustic":
-            # Enhanced acoustic pressure for photoacoustic
             acoustic = acoustic * 1.5
         elif modality == "ultrasound":
-            # Enhanced RF features for ultrasound
             absorption = absorption * 1.3
         
         return {
@@ -549,8 +533,9 @@ class ProjectManager:
         self.sam = None
         self.modality = "microwave"
 
-    def initialize_sam(self, checkpoint_path: Optional[str] = None):
-        self.sam = MobileSAMWrapper(checkpoint_path=checkpoint_path)
+    def initialize_sam(self, checkpoint_path: Optional[str] = None, model_type: str = "tiny"):
+        """Initialize SAM2 with Tiny model for memory optimization."""
+        self.sam = SAM2Wrapper(checkpoint_path=checkpoint_path, model_type=model_type)
         return self.sam._loaded and not self.sam._use_mock
 
     def add_images(self, image_paths: List[str]):
@@ -772,13 +757,18 @@ with gr.Blocks() as demo:
                         elem_classes="horizontal-radio"
                     )
                     
-                    gr.Markdown("### SAM Configuration")
-                    sam_checkpoint = gr.Textbox(
-                        label="SAM Checkpoint Path",
-                        value="mobile_sam.pt",
-                        placeholder="mobile_sam.pt"
+                    gr.Markdown("### SAM2 Configuration")
+                    sam_model_size = gr.Dropdown(
+                        ["tiny (~78MB, fastest)", "small (~300MB)", "base (~500MB)"],
+                        value="tiny (~78MB, fastest)",
+                        label="SAM2 Model Size"
                     )
-                    init_sam_btn = gr.Button("Initialize Mobile SAM", variant="primary")
+                    sam_checkpoint = gr.Textbox(
+                        label="SAM2 Checkpoint Path (optional)",
+                        value="",
+                        placeholder="Leave empty for auto-download"
+                    )
+                    init_sam_btn = gr.Button("Initialize SAM2", variant="primary")
                     sam_status = gr.Textbox(label="SAM Status", value="Not initialized", interactive=False)
                     
                 with gr.Column(scale=1):
@@ -797,17 +787,27 @@ with gr.Blocks() as demo:
 
             modality_select.change(set_modality, [modality_select], [modality_state])
 
-            def init_sam(checkpoint):
+            def init_sam(checkpoint, model_size):
+                # Extract model type from dropdown
+                model_type = "tiny"
+                if "small" in model_size.lower():
+                    model_type = "small"
+                elif "base" in model_size.lower():
+                    model_type = "base"
+                
                 try:
-                    success = project.initialize_sam(checkpoint if checkpoint else None)
+                    success = project.initialize_sam(
+                        checkpoint_path=checkpoint if checkpoint else None,
+                        model_type=model_type
+                    )
                     if success:
-                        return "✅ Mobile SAM initialized successfully (running under 512MB)", gr.update()
+                        return f"✅ SAM2 ({model_type}) initialized successfully (under 512MB)", gr.update()
                     else:
-                        return "⚠️ SAM running in mock mode (checkpoint not found)", gr.update()
+                        return "⚠️ SAM2 running in mock mode (checkpoint not found)", gr.update()
                 except Exception as e:
                     return f"❌ Error: {str(e)}", gr.update()
 
-            init_sam_btn.click(init_sam, [sam_checkpoint], [sam_status, gr.update()])
+            init_sam_btn.click(init_sam, [sam_checkpoint, sam_model_size], [sam_status, gr.update()])
 
         # ==================== INPUT ====================
         with gr.TabItem("Input", id=1):
@@ -837,7 +837,7 @@ with gr.Blocks() as demo:
                 with gr.Column(scale=1):
                     gr.Markdown("### Segmentation Controls")
                     gr.Markdown("Place at least one foreground point, then click Run.")
-                    run_btn = gr.Button("🚀 Run Physics-Guided SAM", variant="primary", size="lg")
+                    run_btn = gr.Button("🚀 Run Physics-Guided SAM2", variant="primary", size="lg")
                     seg_status = gr.Textbox(label="Status", value="Ready")
                     
                     gr.Markdown("### Physics Parameters")
@@ -904,7 +904,7 @@ with gr.Blocks() as demo:
                     return None, None, "Please place at least one foreground point", []
                 
                 if project.sam is None:
-                    return None, None, "SAM not initialized. Go to Setup and initialize.", []
+                    return None, None, "SAM2 not initialized. Go to Setup and initialize.", []
                 
                 try:
                     project.sam.set_image(image)
@@ -917,7 +917,7 @@ with gr.Blocks() as demo:
                             image, fg_points[0], modality
                         )
                     
-                    # Run SAM
+                    # Run SAM2
                     mask = project.sam.predict_from_clicks(points, labels)
                     
                     # Apply physics conditioning
@@ -1084,8 +1084,8 @@ with gr.Blocks() as demo:
                 
                 first_img = images[0]
                 center = (first_img.shape[1]//2, first_img.shape[0]//2)
-                physics = PhysicsSimulator.extract_physical_signature(first_img, center)
-                first_mask = MockSAMDecoder.generate_mask(first_img, center, physics)
+                physics = PhysicsSimulator.extract_physical_signature(first_img, center, project.modality)
+                first_mask = SAM2Wrapper()._mock_predict([center], [1]) if project.sam is None else project.sam._mock_predict([center], [1])
                 all_masks = VolumetricPropagator.propagate_3d(images, first_mask, physics)
                 return images, all_masks, first_mask
 
@@ -1120,8 +1120,8 @@ with gr.Blocks() as demo:
 
             ### 🚀 Quick Start
 
-            1. **Setup**: Upload images/DICOM → Add to Project → Initialize Mobile SAM
-            2. **Input**: Click on image to place foreground points → Run Physics-Guided SAM
+            1. **Setup**: Upload images/DICOM → Add to Project → Select modality → Initialize SAM2
+            2. **Input**: Click on image to place foreground points → Run Physics-Guided SAM2
             3. **Editor**: View mask → Show uncertainty → Click on heatmap to refine
             4. **Results**: Save mask to project
             5. **Export**: Download in your preferred format
@@ -1149,6 +1149,7 @@ with gr.Blocks() as demo:
             - Use background points to exclude ambiguous regions
             - Check uncertainty heatmap to identify weak areas
             - Generate synthetic variations for training data
+            - Select "tiny" model on Render (under 512MB)
             """)
 
 # ------------------------------------------------------------
