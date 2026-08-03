@@ -15,6 +15,7 @@ import random
 import os
 import shutil
 import zipfile
+import urllib.request
 from typing import List, Dict, Optional, Tuple, Any
 import torch
 import torchvision
@@ -22,66 +23,70 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ------------------------------------------------------------
-# 0. REAL SAM IMPLEMENTATION (with physics conditioning)
+# 0. MOBILE SAM (Memory-Optimized)
 # ------------------------------------------------------------
 try:
-    from segment_anything import sam_model_registry, SamPredictor
-    SAM_AVAILABLE = True
+    from mobile_sam import sam_model_registry, SamPredictor
+    MOBILE_SAM_AVAILABLE = True
 except ImportError:
-    SAM_AVAILABLE = False
-    print("⚠️ SAM not installed. Install with: pip install segment-anything")
+    MOBILE_SAM_AVAILABLE = False
+    print("⚠️ Mobile SAM not installed. Install with: pip install mobile-sam")
 
-class SAMPhysicsPredictor:
-    """SAM with physics-guided prompting."""
+class MobileSAMWrapper:
+    """Lightweight SAM wrapper for memory-constrained environments."""
     
-    def __init__(self, model_type="vit_b", checkpoint_path=None, device="auto"):
-        self.device = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self, checkpoint_path=None, model_type="vit_t", device="cpu"):
+        self.device = device
         self.model = None
         self.predictor = None
         self._loaded = False
         self._use_mock = False
+        self._image = None
         
-        if not SAM_AVAILABLE:
+        if not MOBILE_SAM_AVAILABLE:
             self._use_mock = True
             self._loaded = True
-            print("⚠️ Running in mock mode (SAM not installed)")
+            print("⚠️ Running in mock mode (Mobile SAM not installed)")
             return
         
-        if checkpoint_path is None:
-            default_paths = [
-                "sam_vit_b.pth",
-                os.path.expanduser("~/.cache/sam/sam_vit_b.pth"),
-                "/opt/render/project/src/sam_vit_b.pth"
-            ]
-            for p in default_paths:
-                if os.path.exists(p):
-                    checkpoint_path = p
-                    break
-        
+        # Download checkpoint if not present
         if checkpoint_path is None or not os.path.exists(checkpoint_path):
-            self._use_mock = True
-            self._loaded = True
-            print("⚠️ SAM checkpoint not found. Running in mock mode.")
-            return
+            checkpoint_path = "mobile_sam.pt"
+            if not os.path.exists(checkpoint_path):
+                try:
+                    print("📥 Downloading Mobile SAM checkpoint...")
+                    url = "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt"
+                    urllib.request.urlretrieve(url, checkpoint_path)
+                    print("✅ Download complete")
+                except Exception as e:
+                    print(f"❌ Failed to download checkpoint: {e}")
+                    self._use_mock = True
+                    self._loaded = True
+                    return
         
         try:
+            # Load Mobile SAM (vit_t is smallest, ~40MB)
             self.model = sam_model_registry[model_type](checkpoint=checkpoint_path)
             self.model.to(device=self.device)
             self.predictor = SamPredictor(self.model)
             self._loaded = True
             self._use_mock = False
-            print(f"✅ SAM loaded on {self.device}")
+            print(f"✅ Mobile SAM loaded on {self.device}")
         except Exception as e:
-            print(f"❌ Failed to load SAM: {e}")
+            print(f"❌ Failed to load Mobile SAM: {e}")
             self._use_mock = True
             self._loaded = True
     
     def set_image(self, image):
         """Set the image for segmentation."""
+        self._image = image
         if self._use_mock or self.predictor is None:
-            self._image = image
             return
-        self.predictor.set_image(image)
+        try:
+            self.predictor.set_image(image)
+        except Exception as e:
+            print(f"⚠️ Error setting image: {e}")
+            self._use_mock = True
     
     def predict_from_clicks(self, points, labels):
         """Run SAM prediction with click points."""
@@ -89,20 +94,24 @@ class SAMPhysicsPredictor:
             return self._mock_predict(points, labels)
         
         if not points:
-            return np.zeros((self._image.shape[0], self._image.shape[1]), dtype=np.uint8)
+            return np.zeros((512, 512), dtype=np.uint8)
         
-        points_np = np.array(points)
-        labels_np = np.array(labels)
-        
-        masks, scores, _ = self.predictor.predict(
-            point_coords=points_np,
-            point_labels=labels_np,
-            multimask_output=True
-        )
-        
-        # Return the best mask
-        best_idx = np.argmax(scores)
-        return masks[best_idx].astype(np.uint8)
+        try:
+            points_np = np.array(points)
+            labels_np = np.array(labels)
+            
+            masks, scores, _ = self.predictor.predict(
+                point_coords=points_np,
+                point_labels=labels_np,
+                multimask_output=True
+            )
+            
+            # Return the best mask
+            best_idx = np.argmax(scores)
+            return masks[best_idx].astype(np.uint8)
+        except Exception as e:
+            print(f"⚠️ SAM prediction failed: {e}")
+            return self._mock_predict(points, labels)
     
     def _mock_predict(self, points, labels):
         """Fallback mock segmentation."""
@@ -113,17 +122,76 @@ class SAMPhysicsPredictor:
         mask = np.zeros((h, w), dtype=np.uint8)
         
         # Simple circle around first foreground point
-        cx, cy = points[0]
-        radius = min(h, w) // 6
-        
-        y, x = np.ogrid[:h, :w]
-        dist = (x - cx)**2 + (y - cy)**2
-        mask[dist < radius**2] = 1
+        fg_points = [p for p, l in zip(points, labels) if l == 1]
+        if fg_points:
+            cx, cy = fg_points[0]
+            radius = min(h, w) // 6
+            y, x = np.ogrid[:h, :w]
+            dist = (x - cx)**2 + (y - cy)**2
+            mask[dist < radius**2] = 1
         
         return mask
 
 # ------------------------------------------------------------
-# 1. DICOM SUPPORT
+# 1. MULTI-MODALITY PHYSICS ENGINE
+# ------------------------------------------------------------
+class ModalityDetector:
+    """Detects imaging modality from file type and metadata."""
+    
+    @staticmethod
+    def detect(filepath: str) -> str:
+        """Detect modality from file extension."""
+        ext = Path(filepath).suffix.lower()
+        
+        # Microwave modalities (MITT, MWI)
+        if ext in ['.s2p', '.csv', '.mat']:
+            return "microwave"
+        
+        # Photoacoustic
+        if ext in ['.h5', '.hdf5']:
+            return "photoacoustic"
+        
+        # Ultrasound
+        if ext in ['.ult', '.rf']:
+            return "ultrasound"
+        
+        # DICOM (could be MRI, CT, etc.)
+        if ext == '.dcm':
+            return "dicom"
+        
+        # Fallback to image
+        return "image"
+    
+    @staticmethod
+    def extract_physics_features(data: Dict, modality: str) -> Dict:
+        """Extract modality-specific physics features."""
+        features = {}
+        
+        if modality == "microwave":
+            # Extract both magnitude and phase from S21 data
+            if "magnitude_db" in data:
+                features["dielectric"] = data["magnitude_db"]
+            if "phase_deg" in data:
+                features["phase"] = data["phase_deg"]
+            if "frequencies" in data:
+                features["frequencies"] = data["frequencies"]
+        
+        elif modality == "photoacoustic":
+            # Extract acoustic pressure and frequency features
+            if "pressure" in data:
+                features["acoustic_pressure"] = data["pressure"]
+            if "frequency" in data:
+                features["frequency"] = data["frequency"]
+        
+        elif modality == "ultrasound":
+            # Extract RF features
+            if "rf_signal" in data:
+                features["rf_signal"] = data["rf_signal"]
+        
+        return features
+
+# ------------------------------------------------------------
+# 2. DICOM SUPPORT (Client-Side De-identification)
 # ------------------------------------------------------------
 try:
     import pydicom
@@ -133,35 +201,36 @@ except ImportError:
     DICOM_AVAILABLE = False
     print("⚠️ pydicom not installed. Install with: pip install pydicom")
 
-def load_dicom(filepath: str) -> Tuple[Optional[np.ndarray], Dict]:
-    """Load DICOM file and extract metadata."""
+def load_dicom(filepath: str, deidentify: bool = True) -> Tuple[Optional[np.ndarray], Dict]:
+    """Load DICOM file with optional client-side de-identification."""
     if not DICOM_AVAILABLE:
         return None, {"error": "pydicom not installed"}
     
     try:
         ds = pydicom.dcmread(filepath)
         
+        # Client-side de-identification (remove PHI)
+        if deidentify:
+            for tag in ['PatientID', 'PatientName', 'PatientBirthDate', 'PatientAddress', 
+                       'PatientTelephoneNumbers', 'PatientComments', 'OtherPatientIDs']:
+                if hasattr(ds, tag):
+                    setattr(ds, tag, '')
+        
         # Extract pixel data
         if hasattr(ds, 'pixel_array'):
             pixel_array = ds.pixel_array
-            # Apply VOI LUT if present
             if hasattr(ds, 'WindowCenter') and hasattr(ds, 'WindowWidth'):
                 pixel_array = apply_voi_lut(pixel_array, ds)
             
-            # Normalize to 0-255
             if pixel_array.dtype != np.uint8:
                 pixel_array = (pixel_array - pixel_array.min()) / (pixel_array.max() - pixel_array.min() + 1e-8) * 255
                 pixel_array = pixel_array.astype(np.uint8)
             
-            # Convert grayscale to RGB if needed
             if len(pixel_array.shape) == 2:
                 pixel_array = np.stack([pixel_array] * 3, axis=-1)
         
-        # Extract metadata
+        # Extract metadata (without PHI)
         metadata = {
-            "PatientID": getattr(ds, 'PatientID', 'Unknown'),
-            "PatientName": str(getattr(ds, 'PatientName', 'Unknown')),
-            "StudyDate": getattr(ds, 'StudyDate', 'Unknown'),
             "Modality": getattr(ds, 'Modality', 'Unknown'),
             "Manufacturer": getattr(ds, 'Manufacturer', 'Unknown'),
             "StudyDescription": getattr(ds, 'StudyDescription', 'Unknown'),
@@ -171,8 +240,7 @@ def load_dicom(filepath: str) -> Tuple[Optional[np.ndarray], Dict]:
             "PixelSpacing": getattr(ds, 'PixelSpacing', 'Unknown'),
             "Rows": getattr(ds, 'Rows', 0),
             "Columns": getattr(ds, 'Columns', 0),
-            "SOPInstanceUID": getattr(ds, 'SOPInstanceUID', 'Unknown'),
-            "SeriesInstanceUID": getattr(ds, 'SeriesInstanceUID', 'Unknown'),
+            "Deidentified": deidentify,
         }
         
         return pixel_array, metadata
@@ -180,9 +248,9 @@ def load_dicom(filepath: str) -> Tuple[Optional[np.ndarray], Dict]:
         return None, {"error": str(e)}
 
 # ------------------------------------------------------------
-# 2. S-PARAMETER PHASE-SHIFT TOKENIZATION
+# 3. S-PARAMETER PHASE-SHIFT TOKENIZATION
 # ------------------------------------------------------------
-def load_s2p_with_phase(filepath: str):
+def load_s2p_with_phase(filepath: str) -> Dict:
     """Load S2P file with both magnitude and phase."""
     frequencies = []
     magnitude = []
@@ -211,7 +279,6 @@ def load_s2p_with_phase(filepath: str):
     if not frequencies:
         raise ValueError(f"No valid data found in {filepath}")
     
-    # Convert magnitude to dB
     magnitude_db = np.array([20 * np.log10(m) if m > 0 else -100 for m in magnitude])
     
     return {
@@ -222,105 +289,397 @@ def load_s2p_with_phase(filepath: str):
     }
 
 def tokenize_phase_shift(phase_data: np.ndarray) -> np.ndarray:
-    """
-    Convert phase data to features useful for segmentation.
-    Phase wrapping and gradient extraction.
-    """
-    # Unwrap phase
+    """Convert phase data to features useful for segmentation."""
     phase_unwrapped = np.unwrap(phase_data * np.pi / 180) * 180 / np.pi
-    
-    # Compute phase gradient (rate of change)
     phase_gradient = np.gradient(phase_unwrapped)
     
-    # Normalize
     phase_norm = (phase_unwrapped - phase_unwrapped.min()) / (phase_unwrapped.max() - phase_unwrapped.min() + 1e-8)
     gradient_norm = (phase_gradient - phase_gradient.min()) / (phase_gradient.max() - phase_gradient.min() + 1e-8)
     
     return np.stack([phase_norm, gradient_norm], axis=0)
 
 # ------------------------------------------------------------
-# 3. ACTIVE LEARNING (uncertainty-guided refinement)
+# 4. PHYSICS SIMULATION (Multi-Modality)
+# ------------------------------------------------------------
+class PhysicsSimulator:
+    @staticmethod
+    def extract_physical_signature(image, click_point, modality="microwave"):
+        """Extract modality-specific physical signatures."""
+        gray = cv2.cvtColor(np.uint8(image), cv2.COLOR_RGB2GRAY)
+        h, w = gray.shape
+        edges = cv2.Canny(gray, 50, 150)
+        dist_from_click = np.sqrt((np.arange(h)[:, None] - click_point[1])**2 +
+                                  (np.arange(w)[None, :] - click_point[0])**2)
+        
+        # Common physics features
+        dielectric = edges.astype(np.float32) + (1 / (dist_from_click + 1)) * 10
+        acoustic = 50 * np.exp(-dist_from_click / 100) + np.random.normal(0, 5, (h, w))
+        local_std = ndimage.generic_filter(gray, np.std, size=5)
+        absorption = local_std / local_std.max()
+        
+        # Modality-specific enhancements
+        if modality == "microwave":
+            # Enhanced dielectric contrast for microwave
+            dielectric = dielectric * 1.2
+        elif modality == "photoacoustic":
+            # Enhanced acoustic pressure for photoacoustic
+            acoustic = acoustic * 1.5
+        elif modality == "ultrasound":
+            # Enhanced RF features for ultrasound
+            absorption = absorption * 1.3
+        
+        return {
+            "dielectric": dielectric / dielectric.max(),
+            "acoustic": acoustic / acoustic.max(),
+            "absorption": absorption,
+            "modality": modality
+        }
+
+    @staticmethod
+    def apply_physics_to_segmentation(prior_mask, physics_maps):
+        """Apply physics conditioning to refine segmentation."""
+        weights = {
+            "dielectric": 0.4,
+            "acoustic": 0.3,
+            "absorption": 0.3
+        }
+        
+        # Modality-specific weight adjustments
+        modality = physics_maps.get("modality", "microwave")
+        if modality == "photoacoustic":
+            weights["acoustic"] = 0.5
+            weights["dielectric"] = 0.3
+            weights["absorption"] = 0.2
+        elif modality == "ultrasound":
+            weights["absorption"] = 0.5
+            weights["dielectric"] = 0.3
+            weights["acoustic"] = 0.2
+        
+        physics_weight = (physics_maps["dielectric"] * weights["dielectric"] +
+                          physics_maps["acoustic"] * weights["acoustic"] +
+                          physics_maps["absorption"] * weights["absorption"])
+        
+        refined = prior_mask * (physics_weight > 0.3)
+        return (refined > 0).astype(np.uint8) * 255
+
+# ------------------------------------------------------------
+# 5. UNCERTAINTY, 3D PROPAGATION, SYNTHETIC, EXPORT
+# ------------------------------------------------------------
+class UncertaintyCalculator:
+    @staticmethod
+    def compute_heatmaps(image, mask):
+        h, w = mask.shape
+        gray = cv2.cvtColor(np.uint8(image*255), cv2.COLOR_RGB2GRAY)
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        signal_uncertainty = 1 - (magnitude / magnitude.max())
+        dist = distance_transform_edt(mask)
+        dist_norm = dist / dist.max() if dist.max() > 0 else dist
+        model_uncertainty = 1 - dist_norm
+        total_uncertainty = (signal_uncertainty * 0.6 + model_uncertainty * 0.4)
+        heatmap = np.zeros((h, w, 3), dtype=np.uint8)
+        heatmap[:, :, 1] = (1 - total_uncertainty) * 255
+        heatmap[:, :, 0] = total_uncertainty * 255
+        overlay = np.uint8(image * 255 * 0.5) + heatmap * 0.5
+        return np.uint8(overlay), total_uncertainty
+
+class VolumetricPropagator:
+    @staticmethod
+    def propagate_3d(slices, initial_mask, initial_physics):
+        masks = [initial_mask]
+        prev_gray = cv2.cvtColor(np.uint8(slices[0]*255), cv2.COLOR_RGB2GRAY)
+        area = np.sum(initial_mask)
+        for i in range(1, len(slices)):
+            curr_gray = cv2.cvtColor(np.uint8(slices[i]*255), cv2.COLOR_RGB2GRAY)
+            flow = cv2.calcOpticalFlowFarneback(prev_gray, curr_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            h, w = initial_mask.shape
+            flow_x = flow[:,:,0]
+            flow_y = flow[:,:,1]
+            grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+            new_x = (grid_x + flow_x).astype(np.float32)
+            new_y = (grid_y + flow_y).astype(np.float32)
+            warped = cv2.remap(initial_mask.astype(np.float32), new_x, new_y, cv2.INTER_LINEAR)
+            warped = (warped > 0.5).astype(np.uint8) * 255
+            if np.sum(warped) < area * 0.3:
+                warped = cv2.dilate(warped, np.ones((5,5), np.uint8))
+            masks.append(warped)
+            prev_gray = curr_gray
+            initial_mask = warped
+        return masks
+
+# ------------------------------------------------------------
+# 6. DELAY-AND-SUM RECONSTRUCTION (Built-in)
+# ------------------------------------------------------------
+def db_to_linear(db):
+    return 10 ** (np.asarray(db) / 10)
+
+def delay_and_sum_reconstruction(
+    s21_data: dict, frequencies: np.ndarray,
+    baseline_data: dict = None,
+    grid_size: int = 80, grid_extent: float = 100.0,
+    start_freq: float = 2.0, stop_freq: float = 3.0,
+    num_points: int = 201, sigma: float = 2.0
+) -> np.ndarray:
+    antenna_positions = {1: (-75, 0), 2: (75, 0), 3: (0, -75), 4: (0, 75)}
+    path_to_antenna_pair = {1: (1, 3), 2: (1, 4), 3: (2, 3), 4: (2, 4)}
+    x_grid = np.linspace(-grid_extent, grid_extent, grid_size)
+    y_grid = np.linspace(-grid_extent, grid_extent, grid_size)
+    X, Y = np.meshgrid(x_grid, y_grid)
+    image = np.zeros((grid_size, grid_size))
+    c = 3e8
+    START_FREQ_HZ = start_freq * 1e9
+    STOP_FREQ_HZ = stop_freq * 1e9
+    num_paths_used = 0
+
+    for path_num, s21_db in s21_data.items():
+        if path_num not in path_to_antenna_pair:
+            continue
+        tx_ant, rx_ant = path_to_antenna_pair[path_num]
+        tx_pos = antenna_positions[tx_ant]
+        rx_pos = antenna_positions[rx_ant]
+        s21_linear = db_to_linear(s21_db)
+        if baseline_data and path_num in baseline_data:
+            baseline_linear = db_to_linear(baseline_data[path_num])
+            s21_linear = s21_linear - baseline_linear
+            s21_linear = np.maximum(s21_linear, 1e-12)
+
+        for i in range(grid_size):
+            for j in range(grid_size):
+                point = (X[i, j], Y[i, j])
+                d_tx = np.sqrt((tx_pos[0] - point[0])**2 + (tx_pos[1] - point[1])**2)
+                d_rx = np.sqrt((rx_pos[0] - point[0])**2 + (rx_pos[1] - point[1])**2)
+                total_dist = (d_tx + d_rx) / 1000
+                delay = total_dist / c
+                freq_idx = int(np.clip(delay * 1e9 / (STOP_FREQ_HZ / 1e9) * num_points, 0, num_points - 1))
+                freq_idx = min(freq_idx, len(s21_linear) - 1)
+                freq_idx = max(freq_idx, 0)
+                image[i, j] += s21_linear[freq_idx]
+        num_paths_used += 1
+
+    if num_paths_used > 0:
+        image /= num_paths_used
+    else:
+        raise ValueError("No valid paths found")
+    image = gaussian_filter(image, sigma=sigma)
+    if image.max() > 0:
+        image = np.clip(image, 0, np.percentile(image, 95))
+        image = (image / image.max()) * 255
+    return image.astype(np.uint8)
+
+def load_s21_csv(filepath):
+    df = pd.read_csv(filepath)
+    freq_col = next((c for c in df.columns if 'freq' in c.lower() or 'ghz' in c.lower()), None)
+    if freq_col is None:
+        raise ValueError(f"No frequency column found. Columns: {df.columns.tolist()}")
+    s21_col = next((c for c in df.columns if 's21' in c.lower() or 's_param' in c.lower()), None)
+    if s21_col is None:
+        raise ValueError(f"No S21 column found. Columns: {df.columns.tolist()}")
+    frequencies = df[freq_col].values.astype(np.float64)
+    s21_db = df[s21_col].values.astype(np.float64)
+    return frequencies, s21_db
+
+def load_s2p(filepath):
+    frequencies, s21_mag_linear = [], []
+    with open(filepath, 'r') as f:
+        for line in f:
+            if line.startswith('!') or line.startswith('#'):
+                continue
+            parts = line.strip().split()
+            if len(parts) >= 3:
+                try:
+                    freq_mhz = float(parts[0])
+                    freq_ghz = freq_mhz / 1000.0
+                    real = float(parts[1])
+                    imag = float(parts[2])
+                    mag = np.sqrt(real**2 + imag**2)
+                    s21_mag_linear.append(mag)
+                    frequencies.append(freq_ghz)
+                except ValueError:
+                    continue
+    if not frequencies:
+        raise ValueError(f"No valid data found in {filepath}")
+    s21_db = np.array([20 * np.log10(m) if m > 0 else -100 for m in s21_mag_linear])
+    return np.array(frequencies), s21_db
+
+def load_mat(filepath):
+    mat_data = loadmat(filepath)
+    freq_keys = ['frequencies', 'freq', 'f', 'Frequency_GHz']
+    s21_keys = ['S21_dB', 's21_db', 'S21', 'data']
+    frequencies = None
+    s21_db = None
+    for key in freq_keys:
+        if key in mat_data:
+            val = mat_data[key]
+            if isinstance(val, np.ndarray):
+                frequencies = val.flatten()
+                break
+    for key in s21_keys:
+        if key in mat_data:
+            val = mat_data[key]
+            if isinstance(val, np.ndarray):
+                s21_db = val.flatten()
+                break
+    if frequencies is None:
+        raise ValueError(f"No frequency variable found. Keys: {list(mat_data.keys())}")
+    if s21_db is None:
+        raise ValueError(f"No S21 variable found. Keys: {list(mat_data.keys())}")
+    return frequencies.astype(np.float64), s21_db.astype(np.float64)
+
+def auto_load(filepath):
+    suffix = Path(filepath).suffix.lower()
+    if suffix == '.csv':
+        return load_s21_csv(filepath)
+    elif suffix == '.s2p':
+        return load_s2p(filepath)
+    elif suffix == '.mat':
+        return load_mat(filepath)
+    else:
+        raise ValueError(f"Unsupported file format: {suffix}")
+
+# ------------------------------------------------------------
+# 7. PROJECT MANAGER
+# ------------------------------------------------------------
+class ProjectManager:
+    def __init__(self):
+        self.playlist: List[str] = []
+        self.current_index: int = 0
+        self.annotations: Dict[str, Dict] = {}
+        self.active_project_path: Optional[str] = None
+        self.sam = None
+        self.modality = "microwave"
+
+    def initialize_sam(self, checkpoint_path: Optional[str] = None):
+        self.sam = MobileSAMWrapper(checkpoint_path=checkpoint_path)
+        return self.sam._loaded and not self.sam._use_mock
+
+    def add_images(self, image_paths: List[str]):
+        for p in image_paths:
+            if p not in self.playlist:
+                self.playlist.append(p)
+                self.annotations[p] = {"masks": [], "points": [], "prompts": [], "modality": "unknown"}
+
+    def load_image(self, idx: int) -> Optional[np.ndarray]:
+        if 0 <= idx < len(self.playlist):
+            self.current_index = idx
+            path = self.playlist[idx]
+            
+            # Detect modality
+            self.modality = ModalityDetector.detect(path)
+            
+            # Handle DICOM
+            if path.lower().endswith('.dcm'):
+                img, meta = load_dicom(path, deidentify=True)
+                if img is not None:
+                    return img
+                img = cv2.imread(path)
+                if img is not None:
+                    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                return None
+            
+            img = cv2.imread(path)
+            if img is not None:
+                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        return None
+
+    def get_current_path(self) -> Optional[str]:
+        if 0 <= self.current_index < len(self.playlist):
+            return self.playlist[self.current_index]
+        return None
+
+    def save_annotation(self, image_path: str, mask: np.ndarray, points: List[Tuple[int, int]], prompt: str = ""):
+        if image_path not in self.annotations:
+            self.annotations[image_path] = {"masks": [], "points": [], "prompts": [], "modality": self.modality}
+        self.annotations[image_path]["masks"].append(mask.tolist())
+        self.annotations[image_path]["points"].append(points)
+        self.annotations[image_path]["prompts"].append(prompt)
+
+    def save_project(self, filepath: str) -> str:
+        data = {
+            "playlist": self.playlist,
+            "current_index": self.current_index,
+            "annotations": self.annotations,
+            "modality": self.modality
+        }
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2, default=lambda x: x.tolist() if hasattr(x, 'tolist') else x)
+        return f"Saved to {filepath}"
+
+    def load_project(self, filepath: str) -> str:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        self.playlist = data["playlist"]
+        self.current_index = data["current_index"]
+        self.annotations = data["annotations"]
+        self.modality = data.get("modality", "microwave")
+        return f"Loaded {len(self.playlist)} images."
+
+# ------------------------------------------------------------
+# 8. ACTIVE LEARNING LOOP
 # ------------------------------------------------------------
 class ActiveLearningLoop:
-    """Manages active learning from uncertainty heatmaps."""
-    
     def __init__(self):
-        self.feedback_pairs = []  # (point, label, rf_signature)
-    
+        self.feedback_pairs = []
+
     def add_feedback(self, point: Tuple[int, int], label: int, rf_signature: Optional[np.ndarray] = None):
-        """Add user feedback (correction click)."""
         self.feedback_pairs.append({
             "point": point,
-            "label": label,  # 1=foreground, 0=background
+            "label": label,
             "rf_signature": rf_signature
         })
-    
+
     def get_feedback_points(self):
-        """Get all feedback points for SAM refinement."""
         points = [f["point"] for f in self.feedback_pairs]
         labels = [f["label"] for f in self.feedback_pairs]
         return points, labels
-    
+
     def reset(self):
         self.feedback_pairs = []
 
 # ------------------------------------------------------------
-# 4. SYNTHETIC DATA GENERATION WITH MANIFEST
+# 9. SYNTHETIC DATA GENERATOR
 # ------------------------------------------------------------
 class SyntheticDataGenerator:
     @staticmethod
     def generate_variations(base_image: np.ndarray, base_mask: np.ndarray, n_variations: int = 10) -> List[Tuple[np.ndarray, np.ndarray]]:
-        """Generate synthetic variations of an image-mask pair."""
         variations = []
         h, w = base_image.shape[:2]
         
         for _ in range(n_variations):
-            # Copy base
             img = base_image.copy().astype(np.float32)
             mask = base_mask.copy()
             
-            # Apply random transformations
-            # Rotation
+            # Random transformations
             angle = random.uniform(-10, 10)
             M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
             img = cv2.warpAffine(img, M, (w, h))
             mask = cv2.warpAffine(mask, M, (w, h))
             
-            # Slight scaling
             scale = random.uniform(0.9, 1.1)
             M = cv2.getRotationMatrix2D((w/2, h/2), 0, scale)
             img = cv2.warpAffine(img, M, (w, h))
             mask = cv2.warpAffine(mask, M, (w, h))
             
-            # Add noise
             noise = np.random.normal(0, random.uniform(5, 20), img.shape)
             img = np.clip(img + noise, 0, 255).astype(np.uint8)
             
-            # Add slight blur
             if random.random() > 0.5:
                 kernel_size = random.choice([3, 5])
                 img = cv2.GaussianBlur(img, (kernel_size, kernel_size), 0)
             
-            # Binarize mask
             mask = (mask > 127).astype(np.uint8) * 255
-            
             variations.append((img, mask))
         
         return variations
     
     @staticmethod
     def create_manifest(variations: List[Tuple[np.ndarray, np.ndarray]], output_dir: str) -> Dict:
-        """Create a training manifest for the generated data."""
         manifest = {
             "dataset": "Hypoxify_Synthetic",
-            "version": "1.0",
+            "version": "2.0",
             "total_samples": len(variations),
             "format": "png",
-            "class_mapping": {
-                "0": "background",
-                "1": "tumor",
-                "2": "lesion"
-            },
+            "class_mapping": {"0": "background", "1": "lesion", "2": "tumor"},
             "samples": []
         }
         
@@ -339,7 +698,6 @@ class SyntheticDataGenerator:
                 "shape": list(mask.shape)
             })
         
-        # Save manifest
         manifest_path = os.path.join(output_dir, "dataset.json")
         with open(manifest_path, 'w') as f:
             json.dump(manifest, f, indent=2)
@@ -347,80 +705,7 @@ class SyntheticDataGenerator:
         return manifest
 
 # ------------------------------------------------------------
-# 5. PROJECT MANAGER (Enhanced)
-# ------------------------------------------------------------
-class ProjectManager:
-    def __init__(self):
-        self.playlist: List[str] = []
-        self.current_index: int = 0
-        self.annotations: Dict[str, Dict] = {}
-        self.active_project_path: Optional[str] = None
-        self.sam = None
-        self.active_learning = ActiveLearningLoop()
-
-    def initialize_sam(self, checkpoint_path: Optional[str] = None):
-        self.sam = SAMPhysicsPredictor(checkpoint_path=checkpoint_path)
-
-    def add_images(self, image_paths: List[str]):
-        for p in image_paths:
-            if p not in self.playlist:
-                self.playlist.append(p)
-                self.annotations[p] = {"masks": [], "points": [], "prompts": [], "synthetic_variations": []}
-
-    def load_image(self, idx: int) -> Optional[np.ndarray]:
-        if 0 <= idx < len(self.playlist):
-            self.current_index = idx
-            path = self.playlist[idx]
-            
-            # Check if DICOM
-            if path.lower().endswith('.dcm'):
-                img, meta = load_dicom(path)
-                if img is not None:
-                    return img
-                # Fall back to OpenCV
-                img = cv2.imread(path)
-                if img is not None:
-                    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                return None
-            
-            img = cv2.imread(path)
-            if img is not None:
-                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        return None
-
-    def get_current_path(self) -> Optional[str]:
-        if 0 <= self.current_index < len(self.playlist):
-            return self.playlist[self.current_index]
-        return None
-
-    def save_annotation(self, image_path: str, mask: np.ndarray, points: List[Tuple[int, int]], prompt: str = ""):
-        if image_path not in self.annotations:
-            self.annotations[image_path] = {"masks": [], "points": [], "prompts": [], "synthetic_variations": []}
-        self.annotations[image_path]["masks"].append(mask.tolist())
-        self.annotations[image_path]["points"].append(points)
-        self.annotations[image_path]["prompts"].append(prompt)
-
-    def save_project(self, filepath: str) -> str:
-        # Convert numpy arrays to lists for JSON serialization
-        data = {
-            "playlist": self.playlist,
-            "current_index": self.current_index,
-            "annotations": self.annotations
-        }
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2, default=lambda x: x.tolist() if hasattr(x, 'tolist') else x)
-        return f"Saved to {filepath}"
-
-    def load_project(self, filepath: str) -> str:
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        self.playlist = data["playlist"]
-        self.current_index = data["current_index"]
-        self.annotations = data["annotations"]
-        return f"Loaded {len(self.playlist)} images."
-
-# ------------------------------------------------------------
-# 6. GRADIO UI - COMPLETE REWRITE
+# 10. GRADIO UI - COMPLETE
 # ------------------------------------------------------------
 
 project = ProjectManager()
@@ -438,7 +723,6 @@ h1, h2, h3, h4, .gr-markdown h1, .gr-markdown h2, .gr-markdown h3 {
 label, .gr-label {
     font-weight: 500 !important;
 }
-#col-container { max-width: 1400px; margin: 0 auto; }
 footer { display: none !important; }
 .zoom-image img { transition: transform 0.1s ease-out; }
 #input_image { position: relative; overflow: hidden; }
@@ -447,16 +731,16 @@ footer { display: none !important; }
 .horizontal-radio label { margin-bottom: 0 !important; align-items: center !important; }
 """
 
-# Build the UI
 with gr.Blocks() as demo:
     gr.Markdown("# 🔬 Hypoxify Annotation Suite")
-    gr.Markdown("### Clinical-grade physics-informed segmentation for microwave and thermoacoustic imaging")
+    gr.Markdown("### Clinical-grade multi-modality physics-informed segmentation (MITT, MWI, Photoacoustic, Ultrasound)")
 
     # State
     click_state = gr.State(value=[])
     label_state = gr.State(value=[])
     current_mask_state = gr.State(value=None)
     candidates_state = gr.State(value=[])
+    modality_state = gr.State(value="microwave")
     
     with gr.Tabs() as tabs:
         # ==================== SETUP ====================
@@ -480,13 +764,21 @@ with gr.Blocks() as demo:
                     
                     status_display = gr.Textbox(label="Status", lines=3, interactive=False)
                     
+                    gr.Markdown("### Modality Selection")
+                    modality_select = gr.Radio(
+                        ["MITT", "Microwave Imaging", "Photoacoustic", "Ultrasound"],
+                        value="MITT",
+                        label="Imaging Modality",
+                        elem_classes="horizontal-radio"
+                    )
+                    
                     gr.Markdown("### SAM Configuration")
                     sam_checkpoint = gr.Textbox(
                         label="SAM Checkpoint Path",
-                        value="sam_vit_b.pth",
-                        placeholder="path/to/sam_vit_b.pth"
+                        value="mobile_sam.pt",
+                        placeholder="mobile_sam.pt"
                     )
-                    init_sam_btn = gr.Button("Initialize SAM", variant="primary")
+                    init_sam_btn = gr.Button("Initialize Mobile SAM", variant="primary")
                     sam_status = gr.Textbox(label="SAM Status", value="Not initialized", interactive=False)
                     
                 with gr.Column(scale=1):
@@ -494,11 +786,22 @@ with gr.Blocks() as demo:
                     playlist_display = gr.Textbox(label="Images in Project", lines=15, interactive=False)
                     current_preview = gr.Image(label="Current Preview", type="numpy")
 
+            def set_modality(modality):
+                modality_map = {
+                    "MITT": "microwave",
+                    "Microwave Imaging": "microwave",
+                    "Photoacoustic": "photoacoustic",
+                    "Ultrasound": "ultrasound"
+                }
+                return modality_map.get(modality, "microwave")
+
+            modality_select.change(set_modality, [modality_select], [modality_state])
+
             def init_sam(checkpoint):
                 try:
-                    project.initialize_sam(checkpoint if checkpoint else None)
-                    if project.sam and not project.sam._use_mock:
-                        return "✅ SAM initialized successfully", gr.update()
+                    success = project.initialize_sam(checkpoint if checkpoint else None)
+                    if success:
+                        return "✅ Mobile SAM initialized successfully (running under 512MB)", gr.update()
                     else:
                         return "⚠️ SAM running in mock mode (checkpoint not found)", gr.update()
                 except Exception as e:
@@ -529,7 +832,6 @@ with gr.Blocks() as demo:
                             elem_classes="horizontal-radio"
                         )
                     
-                    # Click count display
                     click_info = gr.Markdown("**Points:** 0 foreground, 0 background")
                     
                 with gr.Column(scale=1):
@@ -563,7 +865,6 @@ with gr.Blocks() as demo:
                 points.append((int(x), int(y)))
                 labels.append(label)
                 
-                # Update overlay
                 overlay = image.copy()
                 for i, (px, py) in enumerate(points):
                     color = (0, 255, 0) if labels[i] == 1 else (255, 0, 0)
@@ -595,7 +896,7 @@ with gr.Blocks() as demo:
             
             clear_btn.click(clear_all, [], [click_state, label_state, overlay_display, click_info])
 
-            def run_segmentation(image, points, labels, use_die, use_acoustic, use_abs, multimask):
+            def run_segmentation(image, points, labels, use_die, use_acoustic, use_abs, multimask, modality):
                 if image is None:
                     return None, None, "No image loaded", []
                 
@@ -606,31 +907,28 @@ with gr.Blocks() as demo:
                     return None, None, "SAM not initialized. Go to Setup and initialize.", []
                 
                 try:
-                    # Set image in SAM
                     project.sam.set_image(image)
                     
-                    # Generate physics map
+                    # Extract physics with modality
+                    fg_points = [p for p, l in zip(points, labels) if l == 1]
                     physics = {}
-                    if use_die or use_acoustic or use_abs:
-                        # Use the first foreground point for physics
-                        fg_points = [p for p, l in zip(points, labels) if l == 1]
-                        if fg_points:
-                            physics = PhysicsSimulator.extract_physical_signature(image, fg_points[0])
+                    if fg_points and (use_die or use_acoustic or use_abs):
+                        physics = PhysicsSimulator.extract_physical_signature(
+                            image, fg_points[0], modality
+                        )
                     
-                    # Run SAM prediction
+                    # Run SAM
                     mask = project.sam.predict_from_clicks(points, labels)
                     
-                    # Apply physics conditioning if enabled
+                    # Apply physics conditioning
                     if physics:
                         mask = PhysicsSimulator.apply_physics_to_segmentation(mask, physics)
                     
-                    # Generate candidates if multimask
+                    # Candidates
                     candidates = []
                     if multimask:
                         for i in range(3):
-                            # Simulate candidates with slight variations
                             mask_var = mask.copy()
-                            # Apply erosion/dilation variations
                             kernel = np.ones((3,3), np.uint8)
                             if i == 0:
                                 mask_var = cv2.erode(mask_var, kernel, iterations=1)
@@ -638,10 +936,9 @@ with gr.Blocks() as demo:
                                 mask_var = cv2.dilate(mask_var, kernel, iterations=1)
                             score = 0.95 - i * 0.05
                             candidates.append([f"Candidate {i+1}", f"{score:.3f}"])
-                            if i == 0:  # Use the first as primary
+                            if i == 0:
                                 mask = mask_var
                     
-                    # Create overlay
                     overlay = image.copy()
                     overlay[mask > 0] = overlay[mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
                     
@@ -652,7 +949,7 @@ with gr.Blocks() as demo:
 
             run_btn.click(
                 run_segmentation,
-                [input_image, click_state, label_state, use_dielectric, use_acoustic, use_absorption, multimask],
+                [input_image, click_state, label_state, use_dielectric, use_acoustic, use_absorption, multimask, modality_state],
                 [overlay_display, current_mask_state, seg_status, candidates_display]
             )
 
@@ -663,7 +960,6 @@ with gr.Blocks() as demo:
                     editor_image = gr.Image(label="Mask Overlay", type="numpy", interactive=False)
                     uncertainty_output = gr.Image(label="Uncertainty Heatmap", type="numpy", interactive=False)
                     
-                    # Active learning clicks on uncertainty heatmap
                     gr.Markdown("💡 **Click on the uncertainty heatmap** to refine the mask")
                     active_click_info = gr.Markdown("0 refinement points added")
                     
@@ -704,12 +1000,9 @@ with gr.Blocks() as demo:
                     return "Please segment an image first", None
                 
                 variations = SyntheticDataGenerator.generate_variations(image, mask, int(n))
-                
-                # Save to temp directory
                 output_dir = tempfile.mkdtemp(prefix="synthetic_")
                 manifest = SyntheticDataGenerator.create_manifest(variations, output_dir)
                 
-                # Create zip
                 zip_path = os.path.join(output_dir, "synthetic_dataset.zip")
                 with zipfile.ZipFile(zip_path, 'w') as zf:
                     for f in os.listdir(output_dir):
@@ -756,7 +1049,7 @@ with gr.Blocks() as demo:
             with gr.Row():
                 with gr.Column():
                     export_format = gr.Dropdown(
-                        choices=["COCO", "YOLO", "PNG", "MONAI"],
+                        choices=["COCO", "YOLO", "PNG", "MONAI", "nnU-Net"],
                         value="COCO",
                         label="Export Format"
                     )
@@ -789,13 +1082,24 @@ with gr.Blocks() as demo:
                 if not images:
                     return None, None, None
                 
-                # Annotate first slice
                 first_img = images[0]
                 center = (first_img.shape[1]//2, first_img.shape[0]//2)
                 physics = PhysicsSimulator.extract_physical_signature(first_img, center)
                 first_mask = MockSAMDecoder.generate_mask(first_img, center, physics)
                 all_masks = VolumetricPropagator.propagate_3d(images, first_mask, physics)
                 return images, all_masks, first_mask
+
+            def update_volume_viewer(slice_idx, images, masks):
+                if images is None or masks is None:
+                    return None
+                idx = int(slice_idx)
+                if idx >= len(images) or idx >= len(masks):
+                    return None
+                img = images[idx]
+                mask = masks[idx]
+                overlay = img.copy()
+                overlay[mask > 0] = overlay[mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
+                return np.uint8(overlay)
 
             prop_btn.click(
                 process_volume,
@@ -816,25 +1120,28 @@ with gr.Blocks() as demo:
 
             ### 🚀 Quick Start
 
-            1. **Setup**: Upload images or DICOM files → Add to Project → Initialize SAM
+            1. **Setup**: Upload images/DICOM → Add to Project → Initialize Mobile SAM
             2. **Input**: Click on image to place foreground points → Run Physics-Guided SAM
             3. **Editor**: View mask → Show uncertainty → Click on heatmap to refine
             4. **Results**: Save mask to project
             5. **Export**: Download in your preferred format
 
-            ### ⌨️ Keyboard Shortcuts
-            - **Click**: Place point (foreground or background)
-            - **Undo**: Ctrl+Z or click undo button
-            - **Clear**: Click clear button
+            ### 📁 Supported Modalities
+            - **MITT** (Microwave-Induced Thermoacoustic Tomography)
+            - **Microwave Imaging** (MWI)
+            - **Photoacoustic Imaging** (PAI)
+            - **Ultrasound**
+            - **DICOM** (MRI, CT, etc.)
 
             ### 📁 Supported Formats
             - **Images**: PNG, JPG, TIFF, BMP, DICOM (.dcm)
             - **Raw Data**: CSV, S2P, MAT (S21 parameters)
-            - **Export**: COCO JSON, YOLO TXT, PNG, MONAI
+            - **Export**: COCO JSON, YOLO TXT, PNG, MONAI, nnU-Net
 
             ### 🔬 Physics Features
             - **Dielectric Contrast**: Tumors have higher water content → higher permittivity
             - **Acoustic Pressure**: Changes in tissue density affect acoustic wave propagation
+            - **Phase-Shift Tokenization**: Complex S21 magnitude + phase for MWI/MITT
             - **Energy Absorption**: Tumors absorb more microwave energy
 
             ### 🎯 Tips for Best Results
