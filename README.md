@@ -131,11 +131,16 @@ One-click export that translates annotated masks into ready-to-train packages fo
 - mobile-sam
 - pydicom
 
-## Deploy to Streamlit
-- Push to GitHub
-- On Render: New Web Service → Connect repository
-- Build Command: pip install -r requirements.txt
-- Start Command: python app.py
+## 🚀 Deploy to Streamlit Community Cloud
+
+1. Push your code to a **public GitHub repository**
+2. Go to [share.streamlit.io](https://share.streamlit.io)
+3. Click **"New App"**
+4. Select your repository and branch
+5. Set the **Main file path** to `app.py`
+6. Click **"Deploy"**
+
+Your app will be live at: `https://yourusername-appname.streamlit.app`
 
 Deploy!
 
