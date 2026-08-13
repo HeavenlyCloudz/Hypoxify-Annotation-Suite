@@ -6,7 +6,7 @@ A clinical-grade, multi-modality physics-informed segmentation platform for micr
 
 ## 🚀 Live Demo
 
-**Try it now:** [https://hypoxify-annotation-suite.onrender.com](https://hypoxify-annotation-suite.onrender.com)
+**Try it now:** [https://hypoxify-annotation-suite.onrender.com](https://hypoxify-annotation-suite.streamlit.app/)
 
 ---
 
@@ -119,7 +119,7 @@ One-click export that translates annotated masks into ready-to-train packages fo
 
 ## Dependencies
 
-- gradio>=4.0.0
+- streamlit>=1.35.0
 - opencv-python-headless
 - numpy
 - scipy
@@ -131,7 +131,7 @@ One-click export that translates annotated masks into ready-to-train packages fo
 - mobile-sam
 - pydicom
 
-## Deploy to Render
+## Deploy to Streamlit
 - Push to GitHub
 - On Render: New Web Service → Connect repository
 - Build Command: pip install -r requirements.txt
