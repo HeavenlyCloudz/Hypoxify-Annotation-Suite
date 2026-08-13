@@ -79,11 +79,29 @@ st.markdown("""
         border-radius: 8px;
         border-left: 4px solid #17a2b8;
     }
+    .header-logo {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px 0;
+    }
+    .status-ready {
+        color: #28a745;
+        font-weight: bold;
+    }
+    .status-mock {
+        color: #ffc107;
+        font-weight: bold;
+    }
+    .status-error {
+        color: #dc3545;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------
-# SESSION STATE - PERSISTENT DATA
+# SESSION STATE INIT
 # ------------------------------------------------------------
 if "image_loaded" not in st.session_state:
     st.session_state.image_loaded = False
@@ -101,20 +119,26 @@ if "modality" not in st.session_state:
     st.session_state.modality = "MITT"
 if "sam_initialized" not in st.session_state:
     st.session_state.sam_initialized = False
+if "sam_is_mock" not in st.session_state:
+    st.session_state.sam_is_mock = True
+if "sam_load_error" not in st.session_state:
+    st.session_state.sam_load_error = None
 if "candidates" not in st.session_state:
     st.session_state.candidates = []
+if "selected_candidate" not in st.session_state:
+    st.session_state.selected_candidate = 0
 if "synthetic_generated" not in st.session_state:
     st.session_state.synthetic_generated = False
+if "export_ready" not in st.session_state:
+    st.session_state.export_ready = False
 if "click_mode" not in st.session_state:
     st.session_state.click_mode = "Foreground (+)"
 if "uncertainty_heatmap" not in st.session_state:
     st.session_state.uncertainty_heatmap = None
 if "variations" not in st.session_state:
     st.session_state.variations = None
-if "sam_predictor" not in st.session_state:
-    st.session_state.sam_predictor = None
-if "sam_is_mock" not in st.session_state:
-    st.session_state.sam_is_mock = True
+if "sam" not in st.session_state:
+    st.session_state.sam = None
 
 # ------------------------------------------------------------
 # HEADER WITH LOGO
@@ -134,41 +158,118 @@ with col2:
 st.markdown("---")
 
 # ------------------------------------------------------------
-# 0. SAM2 - AUTO-INITIALIZE WITH CACHE
+# 0. SAM2 - LOAD WITH CACHE
 # ------------------------------------------------------------
-@st.cache_resource
-def load_sam2():
-    """Load SAM2 model with caching - only runs ONCE."""
-    try:
-        # Try to import SAM2
-        from sam2 import sam_model_registry, SamPredictor
+try:
+    from sam2 import sam_model_registry, SamPredictor
+    SAM2_AVAILABLE = True
+except ImportError:
+    SAM2_AVAILABLE = False
+
+class SAM2Wrapper:
+    def __init__(self, model_type="tiny", device="cpu"):
+        self.device = device
+        self.model = None
+        self.predictor = None
+        self._loaded = False
+        self._use_mock = False
+        self._image = None
+        self._load_error = None
         
-        # Try to load the model
+        if not SAM2_AVAILABLE:
+            self._use_mock = True
+            self._loaded = True
+            self._load_error = "SAM2 not installed. Run: pip install sam2"
+            return
+        
         try:
-            model = sam_model_registry["tiny"](checkpoint=None)
-            model.to(device="cpu")
-            predictor = SamPredictor(model)
-            return predictor, False  # predictor, is_mock
+            self.model = sam_model_registry[model_type](checkpoint=None)
+            self.model.to(device=self.device)
+            self.predictor = SamPredictor(self.model)
+            self._loaded = True
+            self._use_mock = False
+            self._load_error = None
         except Exception as e:
-            st.warning(f"⚠️ SAM2 load error: {e}")
-            return None, True
-    except ImportError:
-        # SAM2 not installed
-        return None, True
-    except Exception as e:
-        st.warning(f"⚠️ SAM2 init error: {e}")
-        return None, True
-
-# Auto-initialize SAM2 on startup
-if st.session_state.sam_predictor is None:
-    predictor, is_mock = load_sam2()
-    st.session_state.sam_predictor = predictor
-    st.session_state.sam_is_mock = is_mock
-    st.session_state.sam_initialized = not is_mock
+            self._use_mock = True
+            self._loaded = True
+            self._load_error = str(e)
+    
+    def set_image(self, image):
+        self._image = image
+        if self._use_mock or self.predictor is None:
+            return
+        try:
+            self.predictor.set_image(image)
+        except Exception as e:
+            self._use_mock = True
+            self._load_error = str(e)
+    
+    def predict_from_clicks(self, points, labels):
+        if self._use_mock or self.predictor is None:
+            return self._mock_predict(points, labels)
+        
+        if not points:
+            return np.zeros((512, 512), dtype=np.uint8)
+        
+        try:
+            points_np = np.array(points)
+            labels_np = np.array(labels)
+            masks, scores, _ = self.predictor.predict(
+                point_coords=points_np,
+                point_labels=labels_np,
+                multimask_output=True
+            )
+            best_idx = np.argmax(scores)
+            return masks[best_idx].astype(np.uint8)
+        except Exception as e:
+            self._load_error = str(e)
+            return self._mock_predict(points, labels)
+    
+    def _mock_predict(self, points, labels):
+        if not points or self._image is None:
+            return np.zeros((512, 512), dtype=np.uint8)
+        
+        h, w = self._image.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        fg_points = [p for p, l in zip(points, labels) if l == 1]
+        if fg_points:
+            cx, cy = fg_points[0]
+            radius = min(h, w) // 6
+            y, x = np.ogrid[:h, :w]
+            dist = (x - cx)**2 + (y - cy)**2
+            mask[dist < radius**2] = 1
+        
+        return mask
+    
+    def is_ready(self):
+        return self._loaded and not self._use_mock
+    
+    def is_mock(self):
+        return self._use_mock
+    
+    def get_status(self):
+        if self._use_mock:
+            return "mock", self._load_error
+        return "ready", None
 
 # ------------------------------------------------------------
-# 1. PHYSICS ENGINE
+# 1. MULTI-MODALITY PHYSICS ENGINE
 # ------------------------------------------------------------
+class ModalityDetector:
+    @staticmethod
+    def detect(filepath: str) -> str:
+        ext = Path(filepath).suffix.lower()
+        if ext in ['.s2p', '.csv', '.mat']:
+            return "microwave"
+        if ext in ['.h5', '.hdf5']:
+            return "photoacoustic"
+        if ext in ['.ult', '.rf']:
+            return "ultrasound"
+        if ext == '.dcm':
+            return "dicom"
+        return "image"
+
 class PhysicsSimulator:
     @staticmethod
     def extract_physical_signature(image, click_point, modality="microwave"):
@@ -272,57 +373,16 @@ class SyntheticDataGenerator:
         return variations
 
 # ------------------------------------------------------------
-# 4. SEGMENTATION HELPER
-# ------------------------------------------------------------
-def run_segmentation(image, points, labels, physics, predictor, is_mock):
-    """Run SAM2 prediction with physics conditioning."""
-    if predictor is not None and not is_mock:
-        try:
-            predictor.set_image(image)
-            points_np = np.array(points)
-            labels_np = np.array(labels)
-            masks, scores, _ = predictor.predict(
-                point_coords=points_np,
-                point_labels=labels_np,
-                multimask_output=True
-            )
-            best_idx = np.argmax(scores)
-            mask = masks[best_idx].astype(np.uint8)
-        except Exception as e:
-            st.warning(f"SAM2 prediction failed: {e}. Using mock.")
-            is_mock = True
-            mask = _mock_predict(image, points, labels)
-    else:
-        mask = _mock_predict(image, points, labels)
-    
-    # Apply physics conditioning
-    if physics:
-        mask = PhysicsSimulator.apply_physics_to_segmentation(mask, physics)
-    
-    return mask
-
-def _mock_predict(image, points, labels):
-    """Fallback mock segmentation."""
-    h, w = image.shape[:2]
-    mask = np.zeros((h, w), dtype=np.uint8)
-    if points:
-        fg_points = [p for p, l in zip(points, labels) if l == 1]
-        if fg_points:
-            cx, cy = fg_points[0]
-            radius = min(h, w) // 6
-            y, x = np.ogrid[:h, :w]
-            dist = (x - cx)**2 + (y - cy)**2
-            mask[dist < radius**2] = 1
-    return mask
-
-# ------------------------------------------------------------
-# 5. MAIN STREAMLIT APP
+# 4. MAIN STREAMLIT APP
 # ------------------------------------------------------------
 
+# ============================================================
 # SIDEBAR
+# ============================================================
 with st.sidebar:
     st.markdown("## ⚙️ Configuration")
     
+    # Modality Selection
     modality = st.selectbox(
         "Imaging Modality",
         ["MITT", "Microwave Imaging", "Photoacoustic", "Ultrasound"],
@@ -332,16 +392,48 @@ with st.sidebar:
     
     st.markdown("---")
     
-    st.markdown("### 🧬 SAM2 Status")
-    if st.session_state.sam_initialized and not st.session_state.sam_is_mock:
-        st.success("🟢 SAM2 Ready")
+    # SAM Configuration
+    st.markdown("### 🧬 SAM2 Settings")
+    sam_model_size = st.selectbox(
+        "Model Size",
+        ["tiny (~78MB)", "small (~300MB)", "base (~500MB)"],
+        help="Tiny is recommended for free tier deployments"
+    )
+    
+    # Display current SAM status
+    st.markdown("**Status:**")
+    if st.session_state.sam_initialized and st.session_state.sam is not None and not st.session_state.sam.is_mock():
+        st.markdown('<span class="status-ready">✅ SAM2 Ready</span>', unsafe_allow_html=True)
         st.info("Model: tiny (~78MB, cached)")
     else:
-        st.warning("🟡 SAM2 running in mock mode")
-        st.info("Using fallback segmentation (circle-based)")
+        st.markdown('<span class="status-mock">🟡 SAM2 not initialized</span>', unsafe_allow_html=True)
+        if st.session_state.sam is not None and st.session_state.sam._load_error:
+            st.caption(f"Error: {st.session_state.sam._load_error[:100]}...")
+        else:
+            st.caption("Click 'Initialize SAM2' below to load the model")
+    
+    # Initialize button
+    initialize_sam = st.button("🚀 Initialize SAM2", type="primary")
+    if initialize_sam:
+        with st.spinner("Loading SAM2 model (this may take a moment)..."):
+            try:
+                model_type = sam_model_size.split()[0].lower()
+                st.session_state.sam = SAM2Wrapper(model_type=model_type)
+                st.session_state.sam_initialized = st.session_state.sam.is_ready()
+                st.session_state.sam_is_mock = st.session_state.sam.is_mock()
+                
+                if st.session_state.sam.is_ready():
+                    st.success("✅ SAM2 initialized successfully!")
+                else:
+                    st.warning(f"⚠️ SAM2 running in mock mode. {st.session_state.sam._load_error}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ SAM2 init failed: {e}")
+                st.session_state.sam_initialized = False
     
     st.markdown("---")
     
+    # Physics Parameters
     st.markdown("### 🔬 Physics Parameters")
     use_dielectric = st.checkbox("Dielectric Contrast", value=True)
     use_acoustic = st.checkbox("Acoustic Pressure", value=True)
@@ -349,8 +441,10 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # Project Management
     st.markdown("### 💾 Project")
     project_name = st.text_input("Project Name", value="my_project")
+    
     col1, col2 = st.columns(2)
     with col1:
         if st.button("💾 Save"):
@@ -359,7 +453,9 @@ with st.sidebar:
         if st.button("📂 Load"):
             st.info("Load project")
 
+# ============================================================
 # MAIN CONTENT
+# ============================================================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📡 Data Ingestion",
     "🎯 Segmentation",
@@ -369,7 +465,9 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📤 Export"
 ])
 
+# ------------------------------------------------------------
 # TAB 1: DATA INGESTION
+# ------------------------------------------------------------
 with tab1:
     col1, col2 = st.columns([2, 1])
     
@@ -379,7 +477,8 @@ with tab1:
         
         uploaded_file = st.file_uploader(
             "Choose a file",
-            type=["png", "jpg", "jpeg", "tiff", "dcm", "csv", "s2p", "mat"]
+            type=["png", "jpg", "jpeg", "tiff", "dcm", "csv", "s2p", "mat"],
+            help="Upload a scan or image for annotation"
         )
         
         if uploaded_file is not None:
@@ -410,9 +509,13 @@ with tab1:
                         pixel_array = np.stack([pixel_array] * 3, axis=-1)
                     st.session_state.current_image = pixel_array
                     st.session_state.image_loaded = True
-                    st.success("✅ DICOM loaded!")
+                    st.success("✅ DICOM loaded and de-identified!")
                 except Exception as e:
                     st.error(f"❌ Error loading DICOM: {e}")
+            
+            elif file_ext in ['.csv', '.s2p', '.mat']:
+                st.info("📊 Raw data file uploaded. Use the Segmentation tab to reconstruct and segment.")
+                st.session_state.raw_data_uploaded = True
             
             st.session_state.foreground_clicks = []
             st.session_state.background_clicks = []
@@ -440,7 +543,9 @@ with tab1:
         if st.session_state.image_loaded:
             st.image(st.session_state.current_image, caption="Current Image", use_container_width=True)
 
+# ------------------------------------------------------------
 # TAB 2: SEGMENTATION
+# ------------------------------------------------------------
 with tab2:
     if not st.session_state.image_loaded:
         st.warning("⚠️ Please upload an image in the Data Ingestion tab first.")
@@ -469,7 +574,6 @@ with tab2:
             img_bgr = cv2.cvtColor(img_display, cv2.COLOR_RGB2BGR)
             
             # Clickable image
-            click_success = False
             try:
                 from streamlit_image_coordinates import streamlit_image_coordinates
                 
@@ -477,7 +581,7 @@ with tab2:
                     img_bgr,
                     key="image_click",
                     click_event=True,
-                    width="stretch"
+                    use_container_width=True
                 )
                 
                 if value is not None and value["x"] > 0 and value["y"] > 0:
@@ -490,13 +594,13 @@ with tab2:
                         elif st.session_state.click_mode == "Background (-)" and (x, y) not in st.session_state.background_clicks:
                             st.session_state.background_clicks.append((int(x), int(y)))
                             st.rerun()
-                click_success = True
             except ImportError:
-                st.image(img_bgr, caption="Image with points", use_container_width=True)
+                st.image(img_bgr, caption="Image with points (click not available)", use_container_width=True)
+                st.info("💡 Install streamlit-image-coordinates for click support: pip install streamlit-image-coordinates")
             except Exception as e:
+                st.warning(f"Click interaction limited: {e}")
                 st.image(img_bgr, caption="Image with points", use_container_width=True)
             
-            # Point controls
             col_count, col_mode, col_actions = st.columns([1, 1, 1])
             with col_count:
                 st.markdown(f"**FG:** {len(st.session_state.foreground_clicks)} | **BG:** {len(st.session_state.background_clicks)}")
@@ -510,19 +614,18 @@ with tab2:
             with col_actions:
                 col_clear, col_undo = st.columns(2)
                 with col_clear:
-                    if st.button("🗑️ Clear", width="stretch"):
+                    if st.button("🗑️ Clear", use_container_width=True):
                         st.session_state.foreground_clicks = []
                         st.session_state.background_clicks = []
                         st.rerun()
                 with col_undo:
-                    if st.button("↩️ Undo", width="stretch"):
+                    if st.button("↩️ Undo", use_container_width=True):
                         if st.session_state.background_clicks:
                             st.session_state.background_clicks.pop()
                         elif st.session_state.foreground_clicks:
                             st.session_state.foreground_clicks.pop()
                         st.rerun()
             
-            # Fallback manual input
             with st.expander("✏️ Manual Coordinate Input (Fallback)"):
                 col_x, col_y, col_btn = st.columns([1, 1, 1])
                 with col_x:
@@ -544,7 +647,7 @@ with tab2:
                         key="manual_y"
                     )
                 with col_btn:
-                    if st.button("➕ Add Point", width="stretch"):
+                    if st.button("➕ Add Point", use_container_width=True):
                         if st.session_state.click_mode == "Foreground (+)" and (int(x_coord), int(y_coord)) not in st.session_state.foreground_clicks:
                             st.session_state.foreground_clicks.append((int(x_coord), int(y_coord)))
                             st.rerun()
@@ -552,7 +655,6 @@ with tab2:
                             st.session_state.background_clicks.append((int(x_coord), int(y_coord)))
                             st.rerun()
             
-            # Show mask if segmented
             if st.session_state.segmented and st.session_state.current_mask is not None:
                 st.markdown("### 🎯 Segmentation Result")
                 mask_display = st.session_state.current_image.copy()
@@ -563,32 +665,36 @@ with tab2:
         with col2:
             st.markdown("### 🎯 Segmentation Controls")
             
-            if st.button("🚀 Run Physics-Guided SAM", type="primary", width="stretch"):
+            # Check SAM status before running
+            sam_ready = st.session_state.sam_initialized and st.session_state.sam is not None and not st.session_state.sam.is_mock()
+            
+            if not sam_ready:
+                st.warning("⚠️ SAM2 not initialized. Please go to the sidebar and click 'Initialize SAM2' first.")
+            
+            if st.button("🚀 Run Physics-Guided SAM", type="primary", use_container_width=True, disabled=not sam_ready):
                 if len(st.session_state.foreground_clicks) == 0:
                     st.warning("Please place at least one foreground point.")
                 else:
                     with st.spinner("Running physics-guided segmentation..."):
                         try:
-                            image = st.session_state.current_image
-                            points = st.session_state.foreground_clicks + st.session_state.background_clicks
-                            labels = [1] * len(st.session_state.foreground_clicks) + [0] * len(st.session_state.background_clicks)
+                            sam = st.session_state.sam
+                            sam.set_image(st.session_state.current_image)
+                            
+                            all_points = st.session_state.foreground_clicks + st.session_state.background_clicks
+                            all_labels = [1] * len(st.session_state.foreground_clicks) + [0] * len(st.session_state.background_clicks)
                             
                             physics = {}
                             if st.session_state.foreground_clicks and (use_dielectric or use_acoustic or use_absorption):
                                 physics = PhysicsSimulator.extract_physical_signature(
-                                    image,
+                                    st.session_state.current_image,
                                     st.session_state.foreground_clicks[0],
                                     st.session_state.modality.lower()
                                 )
                             
-                            mask = run_segmentation(
-                                image,
-                                points,
-                                labels,
-                                physics,
-                                st.session_state.sam_predictor,
-                                st.session_state.sam_is_mock
-                            )
+                            mask = sam.predict_from_clicks(all_points, all_labels)
+                            
+                            if physics:
+                                mask = PhysicsSimulator.apply_physics_to_segmentation(mask, physics)
                             
                             st.session_state.current_mask = mask
                             st.session_state.segmented = True
@@ -621,7 +727,7 @@ with tab2:
             st.markdown("---")
             
             if st.session_state.segmented and st.session_state.current_mask is not None:
-                if st.button("🔥 Show Uncertainty Heatmap", width="stretch"):
+                if st.button("🔥 Show Uncertainty Heatmap", use_container_width=True):
                     with st.spinner("Calculating uncertainty..."):
                         heatmap, _ = UncertaintyCalculator.compute_heatmaps(
                             st.session_state.current_image / 255.0,
@@ -657,15 +763,18 @@ with tab2:
                     </div>
                     """, unsafe_allow_html=True)
 
+# ------------------------------------------------------------
 # TAB 3: RESULTS
+# ------------------------------------------------------------
 with tab3:
     if not st.session_state.segmented or st.session_state.current_mask is None:
-        st.warning("⚠️ No segmentation results yet.")
+        st.warning("⚠️ No segmentation results yet. Run segmentation in the Segmentation tab first.")
     else:
         col1, col2 = st.columns([2, 1])
         
         with col1:
             st.markdown("### 🧬 Segmentation Results")
+            
             overlay = st.session_state.current_image.copy()
             mask = st.session_state.current_mask
             overlay[mask > 0] = overlay[mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
@@ -674,6 +783,7 @@ with tab3:
         
         with col2:
             st.markdown("### 📊 Metrics")
+            
             mask = st.session_state.current_mask
             mask_area = np.sum(mask)
             mask_percent = (mask_area / mask.size) * 100
@@ -700,17 +810,21 @@ with tab3:
             </div>
             """, unsafe_allow_html=True)
             
-            if st.button("💾 Save Mask to Project", type="primary", width="stretch"):
+            if st.button("💾 Save Mask to Project", type="primary", use_container_width=True):
                 st.success("✅ Mask saved!")
 
+# ------------------------------------------------------------
 # TAB 4: 3D PROPAGATION
+# ------------------------------------------------------------
 with tab4:
     st.markdown("### 📦 3D Volumetric Propagation")
+    st.markdown("Upload a stack of slices to propagate masks through the volume.")
     
     volume_files = st.file_uploader(
         "Upload Volume Slices",
         type=["png", "jpg", "jpeg", "tiff"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        help="Upload multiple images in order (slice 1, slice 2, ...)"
     )
     
     if volume_files:
@@ -731,8 +845,16 @@ with tab4:
                     center = (first_img.shape[1]//2, first_img.shape[0]//2)
                     physics = PhysicsSimulator.extract_physical_signature(first_img, center, st.session_state.modality.lower())
                     
-                    mask = _mock_predict(first_img, [center], [1])
-                    mask = PhysicsSimulator.apply_physics_to_segmentation(mask, physics)
+                    if st.session_state.sam_initialized and st.session_state.sam is not None and not st.session_state.sam.is_mock():
+                        sam = st.session_state.sam
+                        sam.set_image(first_img)
+                        mask = sam.predict_from_clicks([center], [1])
+                    else:
+                        mask = np.zeros((first_img.shape[0], first_img.shape[1]), dtype=np.uint8)
+                        radius = min(first_img.shape[0], first_img.shape[1]) // 6
+                        y, x = np.ogrid[:first_img.shape[0], :first_img.shape[1]]
+                        dist = (x - center[0])**2 + (y - center[1])**2
+                        mask[dist < radius**2] = 1
                     
                     masks = [mask]
                     prev_gray = cv2.cvtColor(first_img, cv2.COLOR_RGB2GRAY)
@@ -770,12 +892,15 @@ with tab4:
                 except Exception as e:
                     st.error(f"❌ Propagation failed: {e}")
 
+# ------------------------------------------------------------
 # TAB 5: SYNTHETIC DATA
+# ------------------------------------------------------------
 with tab5:
     st.markdown("### 🧪 Synthetic Data Generator")
+    st.markdown("Generate synthetic variations of your segmentation for training data.")
     
     if not st.session_state.segmented or st.session_state.current_mask is None:
-        st.warning("⚠️ Please segment an image first.")
+        st.warning("⚠️ Please segment an image first in the Segmentation tab.")
     else:
         col1, col2 = st.columns([1, 1])
         
@@ -832,12 +957,14 @@ with tab5:
                         mime="application/zip"
                     )
 
+# ------------------------------------------------------------
 # TAB 6: EXPORT
+# ------------------------------------------------------------
 with tab6:
     st.markdown("### 📤 Export Annotations")
     
     if not st.session_state.segmented or st.session_state.current_mask is None:
-        st.warning("⚠️ No annotations to export.")
+        st.warning("⚠️ No annotations to export. Please segment an image first.")
     else:
         export_format = st.selectbox(
             "Export Format",
@@ -904,6 +1031,8 @@ with tab6:
                 else:
                     st.info(f"ℹ️ {export_format} export coming soon!")
 
+# ------------------------------------------------------------
 # FOOTER
+# ------------------------------------------------------------
 st.markdown("---")
-st.caption("🔬 Hypoxify Annotation Suite v2.0")
+st.caption("🔬 Hypoxify Annotation Suite v2.0 | Data stored locally; no data uploaded to servers.")
