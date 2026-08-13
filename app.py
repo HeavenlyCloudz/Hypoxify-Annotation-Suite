@@ -16,6 +16,14 @@ import torchvision
 import warnings
 warnings.filterwarnings("ignore")
 
+# Import for clickable images
+try:
+    from streamlit_image_coordinates import streamlit_image_coordinates
+    IMAGE_COORDS_AVAILABLE = True
+except ImportError:
+    IMAGE_COORDS_AVAILABLE = False
+    st.warning("⚠️ streamlit-image-coordinates not installed. Install with: pip install streamlit-image-coordinates")
+
 # ------------------------------------------------------------
 # PAGE CONFIG
 # ------------------------------------------------------------
@@ -79,6 +87,12 @@ st.markdown("""
         border-radius: 8px;
         border-left: 4px solid #17a2b8;
     }
+    .header-logo {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -109,6 +123,25 @@ if "synthetic_generated" not in st.session_state:
     st.session_state.synthetic_generated = False
 if "export_ready" not in st.session_state:
     st.session_state.export_ready = False
+if "click_mode" not in st.session_state:
+    st.session_state.click_mode = "Foreground (+)"
+
+# ------------------------------------------------------------
+# HEADER WITH LOGO
+# ------------------------------------------------------------
+col1, col2 = st.columns([1, 5])
+
+with col1:
+    try:
+        st.image("logo image.png", width=80)
+    except:
+        st.markdown("🧬")
+
+with col2:
+    st.markdown('<p class="main-header">Hypoxify Annotation Suite</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Clinical-grade multi-modality physics-informed segmentation (MITT, MWI, Photoacoustic, Ultrasound)</p>', unsafe_allow_html=True)
+
+st.markdown("---")
 
 # ------------------------------------------------------------
 # 0. SAM2 TINY (Memory-Optimized)
@@ -313,8 +346,7 @@ class SyntheticDataGenerator:
 # ------------------------------------------------------------
 # 4. MAIN STREAMLIT APP
 # ------------------------------------------------------------
-st.markdown('<p class="main-header">🧬 Hypoxify Annotation Suite</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Clinical-grade multi-modality physics-informed segmentation (MITT, MWI, Photoacoustic, Ultrasound)</p>', unsafe_allow_html=True)
+st.markdown("---")
 
 # ============================================================
 # SIDEBAR
@@ -408,12 +440,10 @@ with tab1:
         )
         
         if uploaded_file is not None:
-            # Check if it's an image or raw data
             file_bytes = uploaded_file.read()
             file_ext = Path(uploaded_file.name).suffix.lower()
             
             if file_ext in ['.png', '.jpg', '.jpeg', '.tiff']:
-                # Load image
                 img = Image.open(io.BytesIO(file_bytes))
                 img_array = np.array(img)
                 if img_array.ndim == 2:
@@ -445,7 +475,6 @@ with tab1:
                 st.info("📊 Raw data file uploaded. Use the Segmentation tab to reconstruct and segment.")
                 st.session_state.raw_data_uploaded = True
             
-            # Reset click points when new image is loaded
             st.session_state.foreground_clicks = []
             st.session_state.background_clicks = []
             st.session_state.current_mask = None
@@ -473,7 +502,7 @@ with tab1:
             st.image(st.session_state.current_image, caption="Current Image", use_container_width=True)
 
 # ------------------------------------------------------------
-# TAB 2: SEGMENTATION
+# TAB 2: SEGMENTATION (WITH CLICKABLE IMAGES)
 # ------------------------------------------------------------
 with tab2:
     if not st.session_state.image_loaded:
@@ -482,59 +511,111 @@ with tab2:
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            st.markdown("### 🖼️ Image with Click Points")
-            
-            # Display image with points
-            img_display = st.session_state.current_image.copy()
-            for px, py in st.session_state.foreground_clicks:
-                cv2.circle(img_display, (px, py), 6, (0, 255, 0), -1)
-                cv2.circle(img_display, (px, py), 8, (255, 255, 255), 2)
-            for px, py in st.session_state.background_clicks:
-                cv2.circle(img_display, (px, py), 6, (0, 0, 255), -1)
-                cv2.circle(img_display, (px, py), 8, (255, 255, 255), 2)
-            
-            st.image(img_display, caption="Click on the image to place points (use the coordinate input below)", use_container_width=True)
-            
-            # Coordinate input for manual clicking
-            st.markdown("### 📍 Place Click Points")
+            st.markdown("### 🖼️ Click on Image to Place Points")
             st.markdown("""
             <div class="click-instruction">
-                🔵 Enter coordinates below to place points
+                👆 Click directly on the image to place points. 
+                Select mode below first: <b>Foreground (+)</b> or <b>Background (-)</b>
             </div>
             """, unsafe_allow_html=True)
             
-            col_x, col_y, col_mode, col_btn = st.columns([1, 1, 1, 1])
-            with col_x:
-                x_coord = st.number_input("X", min_value=0, max_value=st.session_state.current_image.shape[1]-1, value=st.session_state.current_image.shape[1]//2, step=1)
-            with col_y:
-                y_coord = st.number_input("Y", min_value=0, max_value=st.session_state.current_image.shape[0]-1, value=st.session_state.current_image.shape[0]//2, step=1)
-            with col_mode:
-                point_type = st.selectbox("Type", ["Foreground (+)", "Background (-)"])
-            with col_btn:
-                if st.button("➕ Add Point", use_container_width=True):
-                    if point_type == "Foreground (+)":
-                        st.session_state.foreground_clicks.append((int(x_coord), int(y_coord)))
-                    else:
-                        st.session_state.background_clicks.append((int(x_coord), int(y_coord)))
-                    st.rerun()
+            # Prepare image with existing points
+            img_display = st.session_state.current_image.copy()
             
-            col_clear, col_undo, col_count = st.columns([1, 1, 2])
-            with col_clear:
-                if st.button("🗑️ Clear All", use_container_width=True):
-                    st.session_state.foreground_clicks = []
-                    st.session_state.background_clicks = []
-                    st.rerun()
-            with col_undo:
-                if st.button("↩️ Undo Last", use_container_width=True):
-                    if st.session_state.background_clicks:
-                        st.session_state.background_clicks.pop()
-                    elif st.session_state.foreground_clicks:
-                        st.session_state.foreground_clicks.pop()
-                    st.rerun()
+            # Draw existing points
+            for px, py in st.session_state.foreground_clicks:
+                cv2.circle(img_display, (px, py), 8, (0, 255, 0), -1)
+                cv2.circle(img_display, (px, py), 10, (255, 255, 255), 2)
+            for px, py in st.session_state.background_clicks:
+                cv2.circle(img_display, (px, py), 8, (255, 0, 0), -1)
+                cv2.circle(img_display, (px, py), 10, (255, 255, 255), 2)
+            
+            # Convert to BGR for display
+            img_bgr = cv2.cvtColor(img_display, cv2.COLOR_RGB2BGR)
+            
+            # Clickable image
+            if IMAGE_COORDS_AVAILABLE:
+                try:
+                    value = streamlit_image_coordinates(
+                        img_bgr,
+                        key="image_click",
+                        click_event=True,
+                        use_container_width=True
+                    )
+                    
+                    # Handle click
+                    if value is not None and value["x"] > 0 and value["y"] > 0:
+                        x, y = value["x"], value["y"]
+                        # Check if click is within image bounds
+                        h, w = st.session_state.current_image.shape[:2]
+                        if 0 <= x < w and 0 <= y < h:
+                            if st.session_state.click_mode == "Foreground (+)" and (x, y) not in st.session_state.foreground_clicks:
+                                st.session_state.foreground_clicks.append((int(x), int(y)))
+                                st.rerun()
+                            elif st.session_state.click_mode == "Background (-)" and (x, y) not in st.session_state.background_clicks:
+                                st.session_state.background_clicks.append((int(x), int(y)))
+                                st.rerun()
+                except Exception as e:
+                    st.warning(f"Click interaction error: {e}. Using manual input below.")
+            
+            # Display point info
+            col_count, col_mode, col_actions = st.columns([1, 1, 1])
             with col_count:
-                st.markdown(f"**Points:** {len(st.session_state.foreground_clicks)} foreground, {len(st.session_state.background_clicks)} background")
+                st.markdown(f"**FG:** {len(st.session_state.foreground_clicks)} | **BG:** {len(st.session_state.background_clicks)}")
+            with col_mode:
+                st.session_state.click_mode = st.selectbox(
+                    "Mode",
+                    ["Foreground (+)", "Background (-)"],
+                    key="click_mode_selector",
+                    label_visibility="collapsed"
+                )
+            with col_actions:
+                col_clear, col_undo = st.columns(2)
+                with col_clear:
+                    if st.button("🗑️ Clear", use_container_width=True):
+                        st.session_state.foreground_clicks = []
+                        st.session_state.background_clicks = []
+                        st.rerun()
+                with col_undo:
+                    if st.button("↩️ Undo", use_container_width=True):
+                        if st.session_state.background_clicks:
+                            st.session_state.background_clicks.pop()
+                        elif st.session_state.foreground_clicks:
+                            st.session_state.foreground_clicks.pop()
+                        st.rerun()
             
-            # Display mask if segmented
+            # Manual coordinate input (fallback)
+            with st.expander("✏️ Manual Coordinate Input (Fallback)"):
+                st.markdown("Enter coordinates manually if clicking doesn't work:")
+                col_x, col_y, col_btn = st.columns([1, 1, 1])
+                with col_x:
+                    x_coord = st.number_input(
+                        "X", 
+                        min_value=0, 
+                        max_value=st.session_state.current_image.shape[1]-1, 
+                        value=st.session_state.current_image.shape[1]//2,
+                        step=1,
+                        key="manual_x"
+                    )
+                with col_y:
+                    y_coord = st.number_input(
+                        "Y", 
+                        min_value=0, 
+                        max_value=st.session_state.current_image.shape[0]-1, 
+                        value=st.session_state.current_image.shape[0]//2,
+                        step=1,
+                        key="manual_y"
+                    )
+                with col_btn:
+                    if st.button("➕ Add Point", use_container_width=True):
+                        if st.session_state.click_mode == "Foreground (+)" and (int(x_coord), int(y_coord)) not in st.session_state.foreground_clicks:
+                            st.session_state.foreground_clicks.append((int(x_coord), int(y_coord)))
+                            st.rerun()
+                        elif st.session_state.click_mode == "Background (-)" and (int(x_coord), int(y_coord)) not in st.session_state.background_clicks:
+                            st.session_state.background_clicks.append((int(x_coord), int(y_coord)))
+                            st.rerun()
+            
+            # Show mask if segmented
             if st.session_state.segmented and st.session_state.current_mask is not None:
                 st.markdown("### 🎯 Segmentation Result")
                 mask_display = st.session_state.current_image.copy()
@@ -557,11 +638,9 @@ with tab2:
                             sam = st.session_state.sam
                             sam.set_image(st.session_state.current_image)
                             
-                            # Combine points
                             all_points = st.session_state.foreground_clicks + st.session_state.background_clicks
                             all_labels = [1] * len(st.session_state.foreground_clicks) + [0] * len(st.session_state.background_clicks)
                             
-                            # Extract physics
                             physics = {}
                             if st.session_state.foreground_clicks and (use_dielectric or use_acoustic or use_absorption):
                                 physics = PhysicsSimulator.extract_physical_signature(
@@ -570,17 +649,14 @@ with tab2:
                                     st.session_state.modality.lower()
                                 )
                             
-                            # Run SAM
                             mask = sam.predict_from_clicks(all_points, all_labels)
                             
-                            # Apply physics conditioning
                             if physics:
                                 mask = PhysicsSimulator.apply_physics_to_segmentation(mask, physics)
                             
                             st.session_state.current_mask = mask
                             st.session_state.segmented = True
                             
-                            # Generate candidates
                             st.session_state.candidates = []
                             for i in range(3):
                                 mask_var = mask.copy()
@@ -629,7 +705,6 @@ with tab2:
                 st.markdown("### 📊 Live Volumetry")
                 mask = st.session_state.current_mask
                 voxel_count = np.sum(mask)
-                # Estimate volume (assuming 1mm spacing for demo)
                 volume_mm3 = voxel_count
                 volume_mL = volume_mm3 / 1000
                 
@@ -661,13 +736,10 @@ with tab3:
         with col1:
             st.markdown("### 🧬 Segmentation Results")
             
-            # Show overlay
             overlay = st.session_state.current_image.copy()
             mask = st.session_state.current_mask
             overlay[mask > 0] = overlay[mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
             st.image(overlay, caption="Segmented Mask", use_container_width=True)
-            
-            # Show mask alone
             st.image(mask * 255, caption="Binary Mask", use_container_width=True)
         
         with col2:
@@ -699,7 +771,6 @@ with tab3:
             </div>
             """, unsafe_allow_html=True)
             
-            # Save button
             if st.button("💾 Save Mask to Project", type="primary", use_container_width=True):
                 st.success("✅ Mask saved!")
 
@@ -723,7 +794,6 @@ with tab4:
         if st.button("🚀 Propagate Through Volume", type="primary"):
             with st.spinner("Processing volume..."):
                 try:
-                    # Load images
                     images = []
                     for f in volume_files:
                         img = Image.open(f)
@@ -732,25 +802,21 @@ with tab4:
                             img_array = np.stack([img_array] * 3, axis=-1)
                         images.append(img_array)
                     
-                    # Annotate first slice
                     first_img = images[0]
                     center = (first_img.shape[1]//2, first_img.shape[0]//2)
                     physics = PhysicsSimulator.extract_physical_signature(first_img, center, st.session_state.modality.lower())
                     
-                    # Generate mask for first slice
                     if st.session_state.sam_initialized:
                         sam = st.session_state.sam
                         sam.set_image(first_img)
                         mask = sam.predict_from_clicks([center], [1])
                     else:
-                        # Fallback
                         mask = np.zeros((first_img.shape[0], first_img.shape[1]), dtype=np.uint8)
                         radius = min(first_img.shape[0], first_img.shape[1]) // 6
                         y, x = np.ogrid[:first_img.shape[0], :first_img.shape[1]]
                         dist = (x - center[0])**2 + (y - center[1])**2
                         mask[dist < radius**2] = 1
                     
-                    # Propagate through volume
                     masks = [mask]
                     prev_gray = cv2.cvtColor(first_img, cv2.COLOR_RGB2GRAY)
                     area = np.sum(mask)
@@ -772,10 +838,8 @@ with tab4:
                         prev_gray = curr_gray
                         mask = warped
                     
-                    # Show results
                     st.success("✅ Volume propagation complete!")
                     
-                    # Slider to browse slices
                     slice_idx = st.slider("Browse Slices", 0, len(images)-1, 0)
                     
                     col1, col2 = st.columns(2)
@@ -826,9 +890,7 @@ with tab5:
                 with col2:
                     st.image(mask, caption=f"Sample {sample_idx} - Mask", use_container_width=True)
                 
-                # Export button
                 if st.button("📥 Download Synthetic Dataset"):
-                    # Create zip in memory
                     import zipfile
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, 'w') as zf:
@@ -886,7 +948,6 @@ with tab6:
                     )
                 
                 elif export_format == "COCO JSON":
-                    # Simple COCO format
                     coco_data = {
                         "images": [{"id": 1, "width": mask.shape[1], "height": mask.shape[0]}],
                         "annotations": [{
@@ -908,7 +969,6 @@ with tab6:
                     )
                 
                 elif export_format == "YOLO TXT":
-                    # Simple YOLO format
                     h, w = mask.shape
                     y, x = np.where(mask > 0)
                     if len(x) > 0 and len(y) > 0:
@@ -936,4 +996,4 @@ with tab6:
 # FOOTER
 # ------------------------------------------------------------
 st.markdown("---")
-st.caption("🔬 Hypoxify Annotation Suite v2.0 | Data stored locally; no data uploaded to servers.")
+st.caption("🔬 Hypoxify Annotation Suite v2.0 | Built for Conrad Challenge | Data stored locally; no data uploaded to servers.")
