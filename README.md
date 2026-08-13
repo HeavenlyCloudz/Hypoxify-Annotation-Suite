@@ -6,7 +6,7 @@ A clinical-grade, multi-modality physics-informed segmentation platform for micr
 
 ## 🚀 Live Demo
 
-**Try it now:** [https://hypoxify-annotation-suite.onrender.com](https://hypoxify-annotation-suite.streamlit.app/)
+**Try it now:** [https://hypoxify-annotation-suite.streamlit.app](https://hypoxify-annotation-suite.streamlit.app/)
 
 ---
 
