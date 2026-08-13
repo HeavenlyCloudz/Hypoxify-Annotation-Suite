@@ -936,4 +936,4 @@ with tab6:
 # FOOTER
 # ------------------------------------------------------------
 st.markdown("---")
-st.caption("🔬 Hypoxify Annotation Suite v2.0 | Built for Conrad Challenge | Data stored locally; no data uploaded to servers.")
+st.caption("🔬 Hypoxify Annotation Suite v2.0 | Data stored locally; no data uploaded to servers.")
